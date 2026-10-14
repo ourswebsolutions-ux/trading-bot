@@ -1,0 +1,41 @@
+{
+  "name": "@tradepilot/desktop",
+  "productName": "TradePilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TradePilot desktop trading terminal",
+  "author": "AxoraWeb",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "node --import tsx --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "package": "npm run build && electron-builder --config electron-builder.config.cjs",
+    "release": "npm run build && electron-builder --config electron-builder.config.cjs --publish always"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "5.3.0",
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "electron-updater": "6.8.10",
+    "nodemailer": "10.0.11",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@tradepilot/shared": "0.1.0",
+    "@types/node": "24.12.4",
+    "@types/nodemailer": "8.0.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "44.4.5",
+    "electron-builder": "26.17.0",
+    "electron-vite": "5.0.0",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vite": "7.3.6"
+  }
+}

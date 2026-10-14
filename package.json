@@ -1,0 +1,23 @@
+{
+  "name": "tradepilot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "TradePilot desktop trading automation platform",
+  "workspaces": [
+    "packages/shared",
+    "apps/server",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @tradepilot/server",
+    "dev:desktop": "npm run dev -w @tradepilot/desktop",
+    "typecheck": "npm run typecheck -w @tradepilot/shared && npm run typecheck -w @tradepilot/server && npm run typecheck -w @tradepilot/desktop",
+    "test": "npm run test -w @tradepilot/server && npm run test -w @tradepilot/desktop && npm run test:engine",
+    "test:engine": "python3 -m unittest discover -s engine/tests -t engine",
+    "build": "npm run build -w @tradepilot/server && npm run build -w @tradepilot/desktop",
+    "package:desktop": "npm run package -w @tradepilot/desktop"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

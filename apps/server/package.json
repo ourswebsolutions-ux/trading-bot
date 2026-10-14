@@ -1,0 +1,34 @@
+{
+  "name": "@tradepilot/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/main.ts",
+    "start": "node --env-file-if-exists=.env dist/server.js",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "admin:create": "tsx --env-file-if-exists=.env src/cli/create-admin.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env src/cli/migrate.ts",
+    "db:backup": "tsx --env-file-if-exists=.env src/cli/backup.ts",
+    "keys:generate": "tsx src/cli/generate-keys.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "11.1.2",
+    "@fastify/formbody": "9.0.0",
+    "@fastify/multipart": "10.1.2",
+    "@fastify/rate-limit": "11.2.0",
+    "@tradepilot/shared": "0.1.0",
+    "fastify": "5.12.5",
+    "nodemailer": "10.0.11",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "@types/nodemailer": "8.0.2",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  }
+}
