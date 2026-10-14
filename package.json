@@ -15,9 +15,14 @@
     "test": "npm run test -w @tradepilot/server && npm run test -w @tradepilot/desktop && npm run test:engine",
     "test:engine": "python3 -m unittest discover -s engine/tests -t engine",
     "build": "npm run build -w @tradepilot/server && npm run build -w @tradepilot/desktop",
-    "package:desktop": "npm run package -w @tradepilot/desktop"
+    "package:desktop": "npm run package -w @tradepilot/desktop",
+    "test:e2e": "npm run build -w @tradepilot/desktop && tsx apps/desktop/e2e/smoke.ts"
   },
   "engines": {
     "node": ">=22.13"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0",
+    "tsx": "4.23.15"
   }
 }

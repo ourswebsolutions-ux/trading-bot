@@ -66,11 +66,10 @@ export function transaction<T>(db: Db, fn: () => T): T {
   }
 }
 
-export function isUniqueViolation(err: unknown, indexOrColumn?: string): boolean {
-  const message = err instanceof Error ? err.message : String(err)
-  if (!message.includes('UNIQUE constraint failed') && !message.includes('constraint failed: UNIQUE')) {
-    // node:sqlite reports partial-index violations as "UNIQUE constraint failed: index 'name'"
-    if (!/unique/i.test(message)) return false
-  }
-  return indexOrColumn ? message.includes(indexOrColumn) : true
+/** SQLITE_CONSTRAINT_UNIQUE (2067); node:sqlite reports the column, e.g. "payment_requests.transaction_id". */
+export function isUniqueViolation(err: unknown, column?: string): boolean {
+  if (!(err instanceof Error)) return false
+  const e = err as Error & { errcode?: number }
+  const unique = e.errcode === 2067 || e.message.includes('UNIQUE constraint failed')
+  return unique && (!column || e.message.includes(column))
 }
