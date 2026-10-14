@@ -10,7 +10,7 @@
  * invalid AI key, and that live trading cannot be started.
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core'
@@ -51,7 +51,7 @@ async function main() {
   try {
     step('first launch: welcome and password setup on a clean profile')
     const userData = await app.evaluate(({ app: a }) => a.getPath('userData'))
-    assert.equal(path.resolve(userData), path.resolve(profile), `clean profile in use (${userData})`)
+    assert.equal(realpathSync(userData), realpathSync(profile), `clean profile in use (${userData})`)
     assert.equal(await app.evaluate(({ app: a }) => a.isPackaged), true, 'this is a packaged build')
     await page.locator('.welcome').click({ timeout: 30_000 })
     await page.getByRole('heading', { name: 'Create your password' }).waitFor({ timeout: 30_000 })
