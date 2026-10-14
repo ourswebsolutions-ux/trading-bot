@@ -1,3 +1,3 @@
-Place application icons here before a production release (electron-builder conventions):
-`icon.png` (512×512, Linux), `icon.ico` (Windows), `icon.icns` (macOS).
-Without them electron-builder falls back to the default Electron icon.
+Application icon: `icon.svg` (source, same geometry as the in-app BrandMark) rendered to `icon.png` (1024×1024).
+electron-builder derives the Windows `.ico` and macOS `.icns` from `icon.png`.
+Regenerate: `convert -background none icon.svg -resize 1024x1024 icon.png`

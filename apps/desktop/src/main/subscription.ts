@@ -130,7 +130,7 @@ export class SubscriptionService {
       auth: false,
       json: { fingerprint: await this.d.fingerprint(), platform: this.d.platform, appVersion: this.d.appVersion }
     })
-    this.d.secrets.set(DEVICE_TOKEN, res.deviceToken)
+    this.d.secrets.set(DEVICE_TOKEN, res.deviceToken, { allowUnencryptedFallback: true })
     setSetting(this.d.db, 'device.id', res.deviceId)
     setSetting(this.d.db, 'device.referenceCode', res.referenceCode)
   }
@@ -181,7 +181,7 @@ export class SubscriptionService {
         allowed: decision.allowed,
         reason: decision.payload?.reason ?? 'none',
         source: !decision.payload ? 'none' : this.syncError ? 'offline_token' : 'server',
-        detail: decision.detail
+        detail: !this.configured && !decision.allowed ? `${this.d.configurationError ?? 'No subscription server is configured.'} Trials and subscriptions are unavailable in this build.` : decision.detail
       }
     }
   }
@@ -194,7 +194,7 @@ export class SubscriptionService {
   /** Main-process gate for paid features. Throws a user-facing error when access is not allowed. */
   requireAccess(feature: string): void {
     const d = this.decision()
-    if (!d.allowed) throw new UserError('subscription_required', `${feature} requires an active trial or subscription. ${d.detail}`)
+    if (!d.allowed) throw new UserError('subscription_required', `${feature} requires an active trial or subscription. ${this.configured ? d.detail : 'This build has no subscription server configured, so trials and subscriptions are unavailable.'}`)
   }
 
   async plans(): Promise<PlansView> {

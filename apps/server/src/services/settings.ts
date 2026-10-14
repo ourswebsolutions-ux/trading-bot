@@ -14,9 +14,8 @@ export function setSetting(db: Db, key: SettingKey, value: string, at: Date, by:
   ).run(key, value, at.toISOString(), by)
 }
 
-/** Seeds settings that come from the environment on first boot; later edits happen in the admin UI. */
-export function seedSettings(db: Db, at: Date, initialNotifyEmail?: string): void {
-  if (initialNotifyEmail && getSetting(db, 'admin_notify_email') === null) {
-    setSetting(db, 'admin_notify_email', initialNotifyEmail, at, 'env')
-  }
+/** The environment is authoritative: values configured there are applied on every start. */
+export function applyConfiguredSettings(db: Db, at: Date, cfg: { adminNotifyEmail?: string; paymentInstructions?: string }): void {
+  if (cfg.adminNotifyEmail) setSetting(db, 'admin_notify_email', cfg.adminNotifyEmail, at, 'env')
+  if (cfg.paymentInstructions) setSetting(db, 'payment_instructions', cfg.paymentInstructions, at, 'env')
 }

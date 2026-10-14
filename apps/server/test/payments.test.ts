@@ -32,7 +32,7 @@ describe('payment request submission', () => {
     await h.ctx.notifier.idle()
     const mail = h.mailer.sent.at(-1)!
     assert.equal(mail.to, 'payments@example.test')
-    for (const expected of [req.id, 'Lifetime', '$500.00', 'ABC-12345', `https://admin.example.test/admin/requests/${req.id}`]) {
+    for (const expected of [req.id, 'Lifetime', '$500.00', 'ABC-12345', 'https://admin.example.test/review/']) {
       assert.ok(mail.text.includes(expected), `email should include ${expected}`)
     }
     // the request alone grants nothing: entitlement still comes from the trial

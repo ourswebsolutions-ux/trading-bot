@@ -11,7 +11,9 @@ await build({
     'create-admin': 'src/cli/create-admin.ts',
     migrate: 'src/cli/migrate.ts',
     backup: 'src/cli/backup.ts',
-    'generate-keys': 'src/cli/generate-keys.ts'
+    'generate-keys': 'src/cli/generate-keys.ts',
+    'review-resend': 'src/cli/review-resend.ts',
+    'smtp-test': 'src/cli/smtp-test.ts'
   },
   outdir: 'dist',
   bundle: true,

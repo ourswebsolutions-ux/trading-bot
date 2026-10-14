@@ -144,7 +144,7 @@ function PaymentForm({ plans, planCode, onCancel, onSubmitted }: { plans: PlansV
           <Field label="Transaction ID" error={errors.transactionId} hint="Exactly as shown on your bank / wallet receipt">
             <input className={`input mono ${errors.transactionId ? 'invalid' : ''}`} value={txn} maxLength={64} onChange={(e) => setTxn(e.target.value)} placeholder="e.g. 4B7K-99Q2-XX81" />
           </Field>
-          <Field label="Payment screenshot" error={errors.screenshot} hint="PNG, JPEG or WebP, up to 5 MB">
+          <Field group label="Payment screenshot" error={errors.screenshot} hint="PNG, JPEG or WebP, up to 5 MB">
             {shot ? (
               <div className="shot-preview">
                 <img src={shot.previewDataUrl} alt="Selected payment screenshot" />
@@ -231,6 +231,7 @@ export function Subscription() {
               )}
               {lifetime && <p className="muted" style={{ marginBottom: 0 }}>You have lifetime access — no further payments are needed.</p>}
               {subscription?.status?.subscription?.status === 'active' && !lifetime && <p className="faint" style={{ marginBottom: 0 }}>Renewing early extends your plan from its current end date ({date(subscription.status.subscription.expiresAt)}).</p>}
+              <p className="faint" style={{ marginBottom: 0, fontSize: 12 }}>Payments are confirmed manually after review. Questions about a payment: <span className="selectable mono">ourswebsolutions@gmail.com</span></p>
             </Panel>
           )}
           <Panel title="Payment requests" flush>

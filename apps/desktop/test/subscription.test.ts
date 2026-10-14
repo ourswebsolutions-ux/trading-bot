@@ -145,3 +145,14 @@ describe('desktop ↔ server subscription flow (real HTTP)', () => {
     assert.equal(view.access.allowed, false)
   })
 })
+
+describe('update error messages', () => {
+  it('explains common updater failures in plain language', async () => {
+    const { describeUpdateError } = await import('../src/main/updater.js')
+    assert.match(describeUpdateError(new Error('HttpError: 404 \n "method: GET url: https://github.com/x/releases.atom"')), /No published release/)
+    assert.match(describeUpdateError(new Error('sha512 checksum mismatch, expected abc, got def')), /integrity check/)
+    assert.match(describeUpdateError(new Error('net::ERR_INTERNET_DISCONNECTED')), /internet connection/)
+    assert.match(describeUpdateError(new Error('New version 1.0.1 is not signed by the application owner: publisherNames: X')), /not signed by the expected publisher/)
+    assert.match(describeUpdateError(new Error('something odd\nstack')), /^Update failed: something odd\.$/)
+  })
+})

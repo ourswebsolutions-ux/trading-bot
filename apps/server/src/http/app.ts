@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import { SCREENSHOT_MAX_BYTES } from '@tradepilot/shared'
 import type { AppContext } from '../context.js'
 import { AppError } from '../errors.js'
-import { registerAdminRoutes } from './admin.js'
+import { registerReviewRoutes } from './review.js'
 import { registerApiRoutes } from './api.js'
 
 export async function buildApp(ctx: AppContext, opts: { logger?: boolean } = {}): Promise<FastifyInstance> {
@@ -33,7 +33,7 @@ export async function buildApp(ctx: AppContext, opts: { logger?: boolean } = {})
     reply.header('Cross-Origin-Resource-Policy', 'same-origin')
     if (ctx.config.cookieSecure) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
     // Route-specific values (e.g. the sandboxed evidence response) take precedence.
-    if (request.url.startsWith('/admin')) {
+    if (request.url.startsWith('/review')) {
       if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store')
       if (!reply.hasHeader('Content-Security-Policy')) {
         reply.header(
@@ -62,6 +62,6 @@ export async function buildApp(ctx: AppContext, opts: { logger?: boolean } = {})
 
   app.get('/healthz', async () => ({ ok: true }))
   await registerApiRoutes(app, ctx)
-  await registerAdminRoutes(app, ctx)
+  await registerReviewRoutes(app, ctx)
   return app
 }

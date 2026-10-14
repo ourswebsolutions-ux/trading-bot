@@ -1,0 +1,211 @@
+name: Release
+
+# Builds, installs and smoke-tests the installers on each platform, then publishes a GitHub
+# Release with SHA-256 checksums. Publishing happens only after CI and every package job pass.
+#
+# Trigger: push a tag vX.Y.Z (must match apps/desktop/package.json "version"), or run manually
+# (workflow_dispatch) to build and test installers without publishing.
+#
+# Optional repository configuration (Settings → Secrets and variables → Actions):
+#   vars.TRADEPILOT_API_BASE_URL            https:// URL of the subscription server
+#   vars.TRADEPILOT_ENTITLEMENT_PUBLIC_KEY  the server's Ed25519 public key (base64 SPKI)
+#   secrets.WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD, vars.TRADEPILOT_WIN_PUBLISHER   Windows code signing
+#   secrets.MAC_CSC_LINK / MAC_CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID   macOS signing + notarization
+# Without them the installers are unsigned and the app reports "subscription server not configured".
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    name: Package ${{ matrix.name }}
+    needs: ci
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-22.04, builder: --linux --x64 }
+          - { name: windows-x64, os: windows-latest, builder: --win --x64 }
+          - { name: macos-arm64, os: macos-14, builder: --mac --arm64 }
+          - { name: macos-x64, os: macos-15-intel, builder: --mac --x64 }
+    env:
+      MAIN_VITE_API_BASE_URL: ${{ vars.TRADEPILOT_API_BASE_URL }}
+      MAIN_VITE_ENTITLEMENT_PUBLIC_KEY: ${{ vars.TRADEPILOT_ENTITLEMENT_PUBLIC_KEY }}
+      TRADEPILOT_REQUIRE_BUNDLED_ENGINE: '1'
+      TRADEPILOT_WIN_PUBLISHER: ${{ vars.TRADEPILOT_WIN_PUBLISHER }}
+      E2E_SCREENSHOT_DIR: ${{ github.workspace }}/smoke-shots
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v=$(node -p "require('./apps/desktop/package.json').version")
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "::error::Tag ${GITHUB_REF_NAME} does not match app version $v"; exit 1; }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the self-contained trading engine (PyInstaller)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r engine/requirements-build.txt
+          node scripts/build-engine.mjs python
+
+      - name: Build the desktop app
+        run: npm run build -w @tradepilot/desktop
+
+      - name: Package installers
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          CSC_LINK: ${{ runner.os == 'Windows' && secrets.WIN_CSC_LINK || runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          [ -n "$CSC_LINK" ] || unset CSC_LINK CSC_KEY_PASSWORD
+          npx electron-builder --config electron-builder.config.cjs ${{ matrix.builder }} --publish never
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          v=$(node -p "require('./apps/desktop/package.json').version")
+          mkdir -p dist-release
+          cd "apps/desktop/release/$v"
+          for f in *.exe *.AppImage *.deb *.dmg *.zip *.blockmap latest*.yml; do
+            [ -f "$f" ] || continue
+            [ -s "$f" ] || { echo "::error::$f is empty"; exit 1; }
+            cp "$f" "$GITHUB_WORKSPACE/dist-release/"
+          done
+          # each mac architecture writes latest-mac.yml; keep them apart until they are merged
+          [ -f "$GITHUB_WORKSPACE/dist-release/latest-mac.yml" ] && mv "$GITHUB_WORKSPACE/dist-release/latest-mac.yml" "$GITHUB_WORKSPACE/dist-release/latest-mac-${{ matrix.name }}.yml"
+          ls -la "$GITHUB_WORKSPACE/dist-release"
+
+      # ---------- install the real installer on the clean runner and smoke-test it ----------
+      - name: Install and smoke-test (.deb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq xvfb gnome-keyring dbus-x11 libfuse2
+          sudo apt-get install -yq ./dist-release/tradepilot_*_amd64.deb
+          test -x /opt/TradePilot/tradepilot
+          dbus-run-session -- bash -c 'echo -n smoke | gnome-keyring-daemon --unlock --components=secrets >/dev/null && xvfb-run -a --server-args="-screen 0 1440x900x24" npx tsx apps/desktop/e2e/packaged.ts /opt/TradePilot/tradepilot'
+          sudo apt-get remove -yq tradepilot
+
+      - name: Smoke-test (AppImage)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          chmod +x dist-release/TradePilot-*.AppImage
+          dbus-run-session -- bash -c 'echo -n smoke | gnome-keyring-daemon --unlock --components=secrets >/dev/null && xvfb-run -a --server-args="-screen 0 1440x900x24" npx tsx apps/desktop/e2e/packaged.ts "$(ls $PWD/dist-release/TradePilot-*.AppImage)"'
+
+      - name: Install and smoke-test (Windows installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist-release -Filter 'TradePilot-Setup-*.exe' | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'tradepilot.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw 'TradePilot was not installed' }
+          Write-Host "Installed at $($exe.FullName)"
+          npx tsx apps/desktop/e2e/packaged.ts $exe.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install and smoke-test (macOS dmg)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          dmg=$(ls dist-release/TradePilot-*.dmg | head -1)
+          mnt=$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | cut -f3)
+          mkdir -p "$RUNNER_TEMP/Applications"
+          cp -R "$mnt/TradePilot.app" "$RUNNER_TEMP/Applications/"
+          hdiutil detach "$mnt"
+          codesign --verify --deep --verbose=2 "$RUNNER_TEMP/Applications/TradePilot.app"
+          bin=$(ls "$RUNNER_TEMP/Applications/TradePilot.app/Contents/MacOS/" | head -1)
+          npx tsx apps/desktop/e2e/packaged.ts "$RUNNER_TEMP/Applications/TradePilot.app/Contents/MacOS/$bin"
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.name }}
+          path: dist-release/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload smoke-test screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-shots-${{ matrix.name }}
+          path: smoke-shots/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: assets
+          merge-multiple: true
+
+      - name: Merge macOS update metadata and write checksums
+        shell: bash
+        run: |
+          node scripts/merge-latest-mac.mjs assets
+          cd assets
+          ls -la
+          for f in TradePilot-Setup-*.exe TradePilot-*.AppImage tradepilot_*.deb TradePilot-*.dmg; do
+            [ -s "$f" ] || { echo "::error::missing or empty installer matching $f"; exit 1; }
+          done
+          sha256sum -- * | grep -v SHA256SUMS > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create the release (draft first, published when every asset is uploaded)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release-notes.mjs "${GITHUB_REF_NAME}" assets/SHA256SUMS.txt > notes.md
+          gh release create "${GITHUB_REF_NAME}" --draft --title "TradePilot ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag
+          gh release upload "${GITHUB_REF_NAME}" assets/* --clobber
+          expected=$(ls assets | wc -l)
+          uploaded=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets | length')
+          [ "$expected" = "$uploaded" ] || { echo "::error::uploaded $uploaded of $expected assets"; exit 1; }
+          gh release edit "${GITHUB_REF_NAME}" --draft=false --latest

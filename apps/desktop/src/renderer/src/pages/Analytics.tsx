@@ -3,29 +3,31 @@ import type { BacktestResult } from '@shared/ipc'
 import { MAX_BACKTEST_DAYS } from '@shared/strategySpec'
 import { CandleChart, LineChart, type ChartMarker } from '../components/charts'
 import { PaywallBanner, useAccess } from '../components/paywall'
-import { Banner, Button, Empty, Field, Panel, Skeleton } from '../components/ui'
+import { Badge, Banner, Button, Empty, Field, Panel, Skeleton } from '../components/ui'
 import { call, errorMessage } from '../lib/api'
-import { dateTime, money, pct, price, qty, STRATEGY_LABELS } from '../lib/format'
+import { dateTime, money, pct, price, qty } from '../lib/format'
 import { useResource } from '../lib/hooks'
 import { useApp } from '../lib/state'
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: 'up' | 'down' }) {
+function Metric({ label, value, tone, small }: { label: string; value: string; tone?: 'up' | 'down'; small?: boolean }) {
   return (
     <div className="panel tile">
       <span className="label">{label}</span>
-      <span className={`value ${tone ?? ''}`} style={{ fontSize: 19 }}>{value}</span>
+      <span className={`value ${tone ?? ''}`} style={{ fontSize: small ? 15 : 19, whiteSpace: 'nowrap' }}>{value}</span>
     </div>
   )
 }
 
-const REASONS: Record<string, string> = { signal: 'Signal', stop_loss: 'Stop loss', take_profit: 'Take profit', end_of_data: 'End of data' }
+const REASONS: Record<string, string> = { rule: 'Exit rule', signal: 'Signal', stop_loss: 'Stop loss', take_profit: 'Take profit', end_of_data: 'End of data' }
 
 export function Analytics() {
   const { params, navigate, engine } = useApp()
   const { allowed } = useAccess()
-  const strategies = useResource(() => call('strategies:list', {}), [])
+  const strategies = useResource(() => call('strategies:list'), [])
   const [strategyId, setStrategyId] = useState(params.strategy ?? '')
   const [days, setDays] = useState(60)
+  const [feeBps, setFeeBps] = useState<number | null>(null)
+  const [slippageBps, setSlippageBps] = useState(2)
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -34,17 +36,19 @@ export function Analytics() {
     if (!strategyId && strategies.data?.[0]) setStrategyId(strategies.data[0].id)
   }, [strategies.data, strategyId])
   const selected = strategies.data?.find((s) => s.id === strategyId)
-  const maxDays = selected ? MAX_BACKTEST_DAYS[selected.timeframe] : 365
+  const maxDays = selected?.timeframe ? MAX_BACKTEST_DAYS[selected.timeframe] : 365
   useEffect(() => {
     if (days > maxDays) setDays(maxDays)
   }, [maxDays, days])
+  // fee defaults to the strategy's own assumption
+  useEffect(() => setFeeBps(selected ? selected.definition.risk.feeBps : null), [selected?.id])
 
   const run = async () => {
     if (!selected || running) return
     setRunning(true)
     setError(null)
     try {
-      setResult(await call('strategies:backtest', { id: selected.id, days }))
+      setResult(await call('strategies:backtest', { id: selected.id, days, slippageBps, ...(feeBps !== null ? { feeBps } : {}) }))
       void strategies.reload()
     } catch (err) {
       setError(errorMessage(err))
@@ -73,26 +77,50 @@ export function Analytics() {
         {!strategies.data ? <Skeleton height={32} /> : strategies.data.length === 0 ? (
           <Empty icon="strategies" title="No strategies to analyse" action={<Button variant="primary" onClick={() => navigate('strategies')}>Create a strategy</Button>} />
         ) : (
-          <div className="form-row" style={{ gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr) auto', alignItems: 'end' }}>
-            <Field label="Strategy">
+          <div className="form-row" style={{ gridTemplateColumns: 'minmax(0, 2fr) repeat(3, minmax(0, 1fr)) auto', alignItems: 'end' }}>
+            <Field label="Strategy" hint="Historical candles are downloaded from Delta Exchange">
               <select className="select" value={strategyId} onChange={(e) => { setStrategyId(e.target.value); setResult(null); setError(null) }}>
-                {strategies.data.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.symbol} {s.timeframe} · {STRATEGY_LABELS[s.type]}</option>)}
+                {strategies.data.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.symbol} {s.timeframe ?? '?'}{s.validation.valid ? '' : ' · needs attention'}</option>)}
               </select>
             </Field>
             <Field label="Lookback (days)" hint={`Up to ${maxDays} days for ${selected?.timeframe ?? 'this'} candles`}>
               <input className="input mono" type="number" min={1} max={maxDays} value={days} onChange={(e) => setDays(Math.max(1, Math.min(maxDays, Number(e.target.value) || 1)))} />
             </Field>
+            <Field label="Fees (bps per side)" hint="Delta taker fee is about 5 bps">
+              <input className="input mono" type="number" min={0} max={100} step={0.5} value={feeBps ?? ''} onChange={(e) => setFeeBps(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} />
+            </Field>
+            <Field label="Slippage (bps per fill)" hint="Applied against every fill">
+              <input className="input mono" type="number" min={0} max={500} step={0.5} value={slippageBps} onChange={(e) => setSlippageBps(Math.max(0, Math.min(500, Number(e.target.value) || 0)))} />
+            </Field>
             <div style={{ paddingBottom: 18 }}>
-              <Button variant="primary" icon="play" onClick={run} loading={running} disabled={!selected || !allowed}>{running ? 'Running…' : 'Run backtest'}</Button>
+              <Button variant="primary" icon="play" onClick={run} loading={running} disabled={!selected || !allowed || !selected.validation.valid}>{running ? 'Running…' : 'Run backtest'}</Button>
             </div>
           </div>
         )}
         {running && <p className="muted" style={{ margin: '4px 0 0' }}>Downloading {selected?.symbol} candles from Delta Exchange and running the Python engine{engine?.state !== 'ready' ? ' (starting engine)' : ''}…</p>}
+        {selected && !selected.validation.valid && <div style={{ marginTop: 12 }}><Banner tone="warn" title="This strategy cannot be backtested yet">{selected.validation.errors[0]?.message} <Button size="sm" variant="ghost" onClick={() => navigate('strategies')}>Open strategies</Button></Banner></div>}
         {error && <div style={{ marginTop: 12 }}><Banner tone="bad" title="Backtest failed">{error}</Banner></div>}
+        {strategies.data && strategies.data.length > 0 && (
+          <p className="faint" style={{ margin: '8px 0 0', fontSize: 12 }}>
+            Backtests are simulations on past candles: signals on a candle's close fill at the next open, stops and targets intrabar, with the fees and slippage above. Past results do not predict future results, and a backtest never enables paper or live trading.
+          </p>
+        )}
       </Panel>
 
       {shown && m && (
         <>
+          <div className="btn-row" style={{ alignItems: 'center' }}>
+            <Badge tone="info">SIMULATED</Badge>
+            <span className="faint" style={{ fontSize: 12 }}>Fees {m.feeBps ?? '—'} bps per side · slippage {m.slippageBps ?? 0} bps per fill · {m.bars} candles</span>
+          </div>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(6, minmax(0, 1fr))' }}>
+            <Metric label="Net P&L" value={m.netPnl === undefined ? '—' : money(m.netPnl)} tone={(m.netPnl ?? 0) >= 0 ? 'up' : 'down'} />
+            <Metric label="Fees paid" value={m.totalFees === undefined ? '—' : money(m.totalFees)} />
+            <Metric small label="Avg win / avg loss" value={`${m.avgWin == null ? '—' : money(m.avgWin, { digits: 0 })} / ${m.avgLoss == null ? '—' : money(m.avgLoss, { digits: 0 })}`} />
+            <Metric label="Largest loss" value={m.largestLoss == null ? '—' : money(m.largestLoss)} tone={m.largestLoss ? 'down' : undefined} />
+            <Metric label="Losing streak" value={m.maxConsecutiveLosses === undefined ? '—' : `${m.maxConsecutiveLosses} trades`} />
+            <Metric small label="Days halted: loss / count" value={`${m.daysBlockedByLossLimit ?? 0} / ${m.daysBlockedByTradeLimit ?? 0}`} />
+          </div>
           <div className="grid" style={{ gridTemplateColumns: 'repeat(6, minmax(0, 1fr))' }}>
             <Metric label="Total return" value={pct(m.totalReturnPct)} tone={m.totalReturnPct >= 0 ? 'up' : 'down'} />
             <Metric label="Buy & hold" value={pct(m.buyHoldReturnPct)} tone={m.buyHoldReturnPct >= 0 ? 'up' : 'down'} />

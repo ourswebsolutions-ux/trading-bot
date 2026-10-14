@@ -4,7 +4,9 @@ import { BrandMark, Icon, type IconName } from './components/icons'
 import { ConfirmDialog, StatusDot } from './components/ui'
 import { call } from './lib/api'
 import { ago, date, duration } from './lib/format'
-import { useNow } from './lib/hooks'
+import { useEvent, useNow } from './lib/hooks'
+import { TransportStatus } from './components/market'
+import type { MarketHealth } from '@shared/ipc'
 import { serverNow, useApp, type Page } from './lib/state'
 import { Analytics } from './pages/Analytics'
 import { Dashboard } from './pages/Dashboard'
@@ -19,16 +21,15 @@ const NAV: { page: Page; label: string; icon: IconName }[] = [
   { page: 'strategies', label: 'Strategies', icon: 'strategies' },
   { page: 'trading', label: 'Trading', icon: 'trading' },
   { page: 'analytics', label: 'Analytics', icon: 'analytics' },
-  { page: 'notifications', label: 'Notifications', icon: 'bell' },
   { page: 'subscription', label: 'Subscription', icon: 'card' },
   { page: 'settings', label: 'Settings', icon: 'settings' }
 ]
 const CRUMBS: Record<Page, string> = {
   dashboard: 'Overview of markets, account and engine',
   strategies: 'Define and manage rule-based strategies',
-  trading: 'Paper trading · live trading disabled',
+  trading: 'Account, automation and orders',
   analytics: 'Backtest strategies on historical data',
-  notifications: 'Alerts and account messages',
+  notifications: 'Trading alerts and account messages (also sent by email / WhatsApp when enabled)',
   subscription: 'Plans, payments and access',
   settings: 'Preferences, security and integrations'
 }
@@ -70,6 +71,11 @@ function Clock() {
 export function Shell() {
   const { page, navigate, unread, subscription, engine, updates, setAuth } = useApp()
   const [confirmLogout, setConfirmLogout] = useState(false)
+  const [marketHealth, setMarketHealth] = useState<MarketHealth | undefined>()
+  useEffect(() => {
+    void call('market:snapshot').then((s) => setMarketHealth(s.health)).catch(() => undefined)
+  }, [])
+  useEvent('market:changed', (s) => setMarketHealth(s.health))
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -90,7 +96,7 @@ export function Shell() {
 
   const sync = subscription
   const syncTone = !sync?.configured ? 'warn' : sync.syncError ? 'bad' : sync.lastSyncedAt ? 'ok' : undefined
-  const syncLabel = !sync?.configured ? 'Server not configured' : sync.syncError ? 'Server offline' : sync.lastSyncedAt ? `Synced ${ago(sync.lastSyncedAt)}` : 'Connecting…'
+  const syncLabel = !sync?.configured ? 'Server not configured' : sync.syncError ? (sync.online ? 'Sync error' : 'Server offline') : sync.lastSyncedAt ? `Synced ${ago(sync.lastSyncedAt)}` : 'Connecting…'
   const engineTone = engine?.state === 'ready' ? 'ok' : engine?.state === 'error' ? 'bad' : engine?.state === 'starting' ? 'warn' : undefined
   const updateReady = updates?.phase === 'downloaded'
   const downloading = updates?.phase === 'downloading'
@@ -106,7 +112,7 @@ export function Shell() {
           <button key={n.page} className={`nav-item ${page === n.page ? 'active' : ''}`} onClick={() => navigate(n.page)} aria-current={page === n.page ? 'page' : undefined}>
             <Icon name={n.icon} />
             <span>{n.label}</span>
-            {n.page === 'notifications' && unread > 0 ? <span className="count">{unread > 99 ? '99+' : unread}</span> : <span className="kbd">⌃{i + 1}</span>}
+            <span className="kbd">⌃{i + 1}</span>
           </button>
         ))}
         <div className="rail-foot">
@@ -123,10 +129,11 @@ export function Shell() {
       </nav>
       <div className="main">
         <header className="topbar">
-          <h1>{NAV.find((n) => n.page === page)?.label}</h1>
+          <h1>{NAV.find((n) => n.page === page)?.label ?? (page === 'notifications' ? 'Notifications' : '')}</h1>
           <span className="crumb">{CRUMBS[page]}</span>
           <div className="spacer" />
           <span className="status-item" title={sync?.syncError ?? sync?.configurationError ?? ''}><StatusDot tone={syncTone} />{syncLabel}</span>
+          <button className="btn ghost sm" style={{ padding: 0, height: 'auto', border: 0 }} onClick={() => navigate('settings', { tab: 'marketdata' })}><TransportStatus health={marketHealth} /></button>
           <span className="status-item" title={engine?.message ?? ''}><StatusDot tone={engineTone} />Engine {engine?.state ?? '…'}</span>
           {(updateReady || downloading) && (
             <button className="status-item btn ghost sm" onClick={() => navigate('settings', { tab: 'updates' })}>

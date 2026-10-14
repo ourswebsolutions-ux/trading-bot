@@ -101,22 +101,36 @@ export async function createAdminAccount(h: Harness, role: AdminRole = 'superadm
 
 /** Performs the real login flow (GET form → CSRF cookie → POST) and returns cookie header + session CSRF token. */
 let ipCounter = 0
-/** Each simulated sign-in comes from its own address unless one is given, so the per-IP login limit does not leak between tests. */
-export async function adminLogin(h: Harness, email = ADMIN_EMAIL, password = ADMIN_PASSWORD, remoteAddress = `10.1.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`) {
-  const form = await h.app.inject({ method: 'GET', url: '/admin/login', remoteAddress })
-  const loginCookie = form.cookies.find((c) => c.name === 'tp_login' || c.name === '__Host-tp_login')!
-  const csrf = /name="_csrf" value="([^"]+)"/.exec(form.body)![1]!
+const nextIp = () => `10.1.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`
+
+/** Confirm/Cancel URLs from the most recent admin email about a request. */
+export async function emailedLinks(h: Harness, requestId: string): Promise<{ confirm: string; cancel: string }> {
+  await h.ctx.notifier.idle()
+  const mail = [...h.mailer.sent].reverse().find((m) => m.text.includes(requestId) && m.text.includes('Confirm Payment:'))
+  if (!mail) throw new Error('no review email for request')
+  const confirm = /Confirm Payment:\s+(\S+)/.exec(mail.text)![1]!
+  const cancel = /Cancel Request:\s+(\S+)/.exec(mail.text)![1]!
+  return { confirm: new URL(confirm).pathname, cancel: new URL(cancel).pathname }
+}
+
+/** Opens a review link like a browser: GET the page, keep the CSRF cookie, POST the form. */
+export async function submitReview(
+  h: Harness,
+  path: string,
+  fields: Record<string, string>,
+  opts: { email?: string; password?: string; remoteAddress?: string; origin?: string; skipCsrf?: boolean } = {}
+) {
+  const remoteAddress = opts.remoteAddress ?? nextIp()
+  const page = await h.app.inject({ method: 'GET', url: path, remoteAddress })
+  if (page.statusCode !== 200) return { page, res: page }
+  const cookie = page.cookies.find((c) => c.name.endsWith('tp_review'))!
+  const csrf = /name="_csrf" value="([^"]+)"/.exec(page.body)![1]!
   const res = await h.app.inject({
     method: 'POST',
-    url: '/admin/login',
-    headers: { cookie: `${loginCookie.name}=${loginCookie.value}` },
-    payload: { _csrf: csrf, email, password, next: '/admin' },
-    remoteAddress
+    url: path,
+    remoteAddress,
+    headers: { cookie: `${cookie.name}=${cookie.value}`, ...(opts.origin ? { origin: opts.origin } : {}) },
+    payload: { ...(opts.skipCsrf ? {} : { _csrf: csrf }), email: opts.email ?? ADMIN_EMAIL, password: opts.password ?? ADMIN_PASSWORD, ...fields }
   })
-  const session = res.cookies.find((c) => c.name.endsWith('tp_admin'))
-  if (!session) return { res, cookie: '', csrf: '' }
-  const cookie = `${session.name}=${session.value}`
-  const page = await h.app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
-  const sessionCsrf = /name="_csrf" value="([^"]+)"/.exec(page.body)![1]!
-  return { res, cookie, csrf: sessionCsrf }
+  return { page, res }
 }

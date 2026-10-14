@@ -1,5 +1,8 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { AiError } from './ai/provider.js'
 import { UserError } from './errors.js'
+import { ProviderError } from './net.js'
+import { redact } from './redact.js'
 import type { Channel, IpcError, Req, Res, Result } from '../shared/ipc.js'
 
 export interface Guard {
@@ -35,10 +38,12 @@ export function createIpcRegistry(opts: {
           return { ok: true, data }
         } catch (err) {
           if (err instanceof UserError) {
-            const error: IpcError = { code: err.code, message: err.message }
+            const error: IpcError = { code: err.code, message: redact(err.message) }
             if (err.fields) error.fields = err.fields
             return { ok: false, error }
           }
+          if (err instanceof ProviderError) return { ok: false, error: { code: `provider_${err.kind}`, message: err.message } }
+          if (err instanceof AiError) return { ok: false, error: { code: `ai_${err.code}`, message: redact(err.message) } }
           opts.log(`IPC ${channel} failed`, err instanceof Error ? err.stack : err)
           return { ok: false, error: { code: 'internal', message: 'Something went wrong. The details were written to the application log.' } }
         }

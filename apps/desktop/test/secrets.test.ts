@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { IntegrationService, deltaSignature } from '../src/main/integrations.js'
+import { deltaSignature } from '../src/main/delta/rest.js'
+import { integrationService } from './helpers.js'
 import { maskHint, SecretStore } from '../src/main/secrets.js'
 import { memoryDb, secretStore } from './helpers.js'
 
@@ -22,19 +23,22 @@ describe('credential storage', () => {
       decrypt: () => ''
     })
     assert.throws(() => store.set('x', 'value'), /no keyring/)
+    assert.throws(() => store.set('openai.apiKey', 'value', { allowUnencryptedFallback: true }), /constraint/i, 'only the device token may be stored unencrypted')
+    store.set('device.token', 'tok-123', { allowUnencryptedFallback: true })
+    assert.equal(store.get('device.token'), 'tok-123')
   })
 
   it('integration views never contain secret values and saving resets the test status', () => {
     const { db, store } = secretStore()
-    const svc = new IntegrationService(db, store)
+    const { svc } = integrationService(db, store)
     assert.equal(svc.view('delta').state, 'not_configured')
-    assert.throws(() => svc.save({ id: 'delta', config: { baseUrl: 'https://evil.example' }, secrets: { apiKey: 'k' } }), /highlighted/)
-    const view = svc.save({ id: 'delta', config: { baseUrl: 'https://api.india.delta.exchange' }, secrets: { apiKey: 'AKEY-0000-1111-2222', apiSecret: 'SECRET-aaaa-bbbb-cccc' } })
+    assert.throws(() => svc.save({ id: 'delta', config: { region: 'mars' }, secrets: { apiKey: 'k' } }), /highlighted/)
+    const view = svc.save({ id: 'delta', config: { region: 'india' }, secrets: { apiKey: 'AKEY-0000-1111-2222', apiSecret: 'SECRET-aaaa-bbbb-cccc' } })
     assert.equal(view.state, 'untested')
     assert.equal(view.secrets.apiKey, '••••2222')
     assert.ok(!JSON.stringify(view).includes('SECRET-aaaa'))
     // omitted secrets keep their stored value
-    svc.save({ id: 'delta', config: { baseUrl: 'https://api.delta.exchange' }, secrets: {} })
+    svc.save({ id: 'delta', config: { region: 'global' }, secrets: {} })
     assert.equal(svc.secret('delta', 'apiSecret'), 'SECRET-aaaa-bbbb-cccc')
     assert.equal(svc.clear('delta').state, 'not_configured')
     assert.equal(svc.secret('delta', 'apiSecret'), null)

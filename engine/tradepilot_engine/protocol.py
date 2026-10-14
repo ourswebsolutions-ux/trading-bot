@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict
 
 from . import LIVE_TRADING_ENABLED, __version__
 from .backtest import BacktestError, run_backtest
+from .rules import RuleError, run_rules_backtest
+from .live import LiveError, evaluate_session, protective_levels
 from .strategies import RISK_LIMITS, STRATEGY_TYPES, ValidationError, validate
 
 
@@ -54,6 +56,39 @@ def _backtest(params: Dict[str, Any]) -> Dict[str, Any]:
         raise RpcError("invalid_data", str(e))
 
 
+def _backtest_rules(params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        fee = params.get("feeBps")
+        return run_rules_backtest(
+            params.get("definition") or {},
+            params.get("candles") or [],
+            float(params.get("initialEquity", 10_000)),
+            fee_bps=None if fee is None else float(fee),
+            slippage_bps=float(params.get("slippageBps") or 0),
+        )
+    except RuleError as e:
+        raise RpcError("invalid_strategy", str(e))
+    except BacktestError as e:
+        raise RpcError("invalid_data", str(e))
+
+
+def _session_evaluate(params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return evaluate_session(params)
+    except (LiveError, RuleError) as e:
+        raise RpcError("invalid_session", str(e))
+    except BacktestError as e:
+        raise RpcError("invalid_data", str(e))
+
+
+def _protective_levels(params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        side = 1 if params.get("side") == "long" else -1
+        return protective_levels(params["definition"], side, float(params["entryPrice"]), params.get("candles") or [], float(params.get("tickSize") or 0))
+    except (LiveError, KeyError, ValueError) as e:
+        raise RpcError("invalid_request", str(e))
+
+
 def _live_order(_: Dict[str, Any]) -> Dict[str, Any]:
     raise RpcError("live_trading_disabled", "Live trading is disabled in this release.")
 
@@ -63,6 +98,9 @@ METHODS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "strategy_types": _strategy_types,
     "validate_strategy": _validate,
     "backtest": _backtest,
+    "backtest_rules": _backtest_rules,
+    "session_evaluate": _session_evaluate,
+    "protective_levels": _protective_levels,
     "place_live_order": _live_order,
 }
 

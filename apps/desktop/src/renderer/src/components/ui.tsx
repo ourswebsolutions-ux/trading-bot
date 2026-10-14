@@ -42,9 +42,26 @@ export function Panel({ title, actions, children, flush, className = '' }: { tit
   )
 }
 
-export function Field({ label, hint, error, children, aside }: { label: ReactNode; hint?: ReactNode; error?: string; children: ReactNode; aside?: ReactNode }) {
+export function Field({ label, hint, error, children, aside, group }: { label: ReactNode; hint?: ReactNode; error?: string; children: ReactNode; aside?: ReactNode; group?: boolean }) {
   const id = useId()
   const describedBy = error || hint ? `${id}-desc` : undefined
+  const description = error ? <span id={describedBy} className="f-error" role="alert">{error}</span> : hint ? <span id={describedBy} className="f-hint">{hint}</span> : null
+  const labelText = (
+    <span className="f-label" id={`${id}-label`}>
+      <span>{label}</span>
+      {aside}
+    </span>
+  )
+  // Non-input content (buttons, previews) is a labelled group rather than being nested in a <label>.
+  if (group) {
+    return (
+      <div className="field" role="group" aria-labelledby={`${id}-label`} aria-describedby={describedBy}>
+        {labelText}
+        {children}
+        {description}
+      </div>
+    )
+  }
   // Hints and errors sit outside the <label> so they don't become part of the control's accessible name.
   const control = isValidElement<{ 'aria-describedby'?: string; 'aria-invalid'?: boolean }>(children)
     ? cloneElement(children, { 'aria-describedby': describedBy, 'aria-invalid': error ? true : undefined })
@@ -52,13 +69,10 @@ export function Field({ label, hint, error, children, aside }: { label: ReactNod
   return (
     <div className="field">
       <label className="field-label">
-        <span className="f-label">
-          <span>{label}</span>
-          {aside}
-        </span>
+        {labelText}
         {control}
       </label>
-      {error ? <span id={describedBy} className="f-error" role="alert">{error}</span> : hint ? <span id={describedBy} className="f-hint">{hint}</span> : null}
+      {description}
     </div>
   )
 }
@@ -217,8 +231,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const dismiss = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), [])
   const push = useCallback((t: Omit<Toast, 'id'>) => {
     const id = Date.now() + Math.random()
-    setToasts((all) => [...all.slice(-3), { ...t, id }])
-    setTimeout(() => dismiss(id), t.tone === 'bad' ? 9000 : 5000)
+    setToasts((all) => [...all.slice(-2), { ...t, id }])
+    setTimeout(() => dismiss(id), t.tone === 'bad' ? 8000 : 4000)
   }, [dismiss])
   return (
     <ToastCtx.Provider value={push}>
@@ -236,6 +250,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         ))}
       </div>
     </ToastCtx.Provider>
+  )
+}
+
+/** Password field with a show/hide toggle. Revealing only affects what is typed here; stored secrets are never shown. */
+export function PasswordInput({ invalid, className = '', ...rest }: React.InputHTMLAttributes<HTMLInputElement> & { invalid?: boolean }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <span className="pw-wrap">
+      <input {...rest} type={shown ? 'text' : 'password'} className={`input ${invalid ? 'invalid' : ''} ${className}`} spellCheck={false} autoCapitalize="off" />
+      <button type="button" className="pw-eye" onClick={() => setShown((v) => !v)} aria-label={shown ? 'Hide password' : 'Show password'} aria-pressed={shown} tabIndex={-1} disabled={rest.disabled}>
+        <Icon name={shown ? 'eyeOff' : 'eye'} size={15} />
+      </button>
+    </span>
   )
 }
 

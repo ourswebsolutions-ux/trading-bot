@@ -11,6 +11,13 @@
   "exports": {
     ".": "./src/index.ts",
     "./entitlement": "./src/entitlement.ts",
-    "./passwords": "./src/passwords.ts"
+    "./passwords": "./src/passwords.ts",
+    "./smtp": "./src/smtp.ts"
+  },
+  "dependencies": {
+    "nodemailer": "10.0.11"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "8.0.2"
   }
 }

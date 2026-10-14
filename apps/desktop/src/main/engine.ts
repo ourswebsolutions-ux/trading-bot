@@ -16,14 +16,16 @@ export class EngineBridge {
   private child: ChildProcessWithoutNullStreams | null = null
   private nextId = 1
   private pending = new Map<number, Pending>()
-  private status: EngineStatus = { state: 'stopped', message: null, engineVersion: null, python: null, liveTradingEnabled: false }
+  private status: EngineStatus = { state: 'stopped', message: null, engineVersion: null, python: null, bundled: false, liveTradingEnabled: false }
   private starting: Promise<void> | null = null
   private stderrTail = ''
 
   constructor(
     private readonly engineDir: string,
     private readonly pythonPath: () => string,
-    private readonly onChange: (s: EngineStatus) => void = () => {}
+    private readonly onChange: (s: EngineStatus) => void = () => {},
+    /** Self-contained engine executable shipped with installers; used instead of Python when present. */
+    private readonly bundledExecutable: string | null = null
   ) {}
 
   getStatus(): EngineStatus {
@@ -43,17 +45,18 @@ export class EngineBridge {
   }
 
   private async spawnEngine(): Promise<void> {
+    const bundled = this.bundledExecutable && existsSync(this.bundledExecutable) ? this.bundledExecutable : null
     const entry = path.join(this.engineDir, 'run_engine.py')
-    if (!existsSync(entry)) {
-      this.set({ state: 'error', message: `Engine files not found in ${this.engineDir}` })
+    if (!bundled && !existsSync(entry)) {
+      this.set({ state: 'error', message: `Engine files not found in ${this.engineDir}`, bundled: false })
       return
     }
-    this.set({ state: 'starting', message: null })
+    this.set({ state: 'starting', message: null, bundled: Boolean(bundled) })
     this.stderrTail = ''
-    const python = this.pythonPath()
-    // -E: ignore PYTHON* env vars, -s: no user site-packages, -u: unbuffered stdio
-    const child = spawn(python, ['-E', '-s', '-u', entry], {
-      cwd: this.engineDir,
+    const python = bundled ?? this.pythonPath()
+    // bundled: the PyInstaller executable; otherwise -E: ignore PYTHON* env vars, -s: no user site-packages, -u: unbuffered stdio
+    const child = spawn(python, bundled ? [] : ['-E', '-s', '-u', entry], {
+      cwd: bundled ? path.dirname(bundled) : this.engineDir,
       env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '', PYTHONIOENCODING: 'utf-8' },
       windowsHide: true
     })
@@ -69,7 +72,7 @@ export class EngineBridge {
     }
     child.on('error', (err) => {
       this.child = null
-      const msg = (err as NodeJS.ErrnoException).code === 'ENOENT' ? `Python was not found ("${python}"). Install Python 3.10+ or set its path in Settings → General.` : err.message
+      const msg = (err as NodeJS.ErrnoException).code === 'ENOENT' ? (bundled ? `The bundled trading engine could not be started (${bundled}). Reinstall TradePilot.` : `Python was not found ("${python}"). Install Python 3.10+ or set its path in Settings → General.`) : err.message
       this.set({ state: 'error', message: msg })
       failAll(msg)
     })

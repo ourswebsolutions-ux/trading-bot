@@ -16,3 +16,5 @@ apps/server/var/
 __pycache__/
 *.pyc
 .update-test/
+engine/dist/
+engine/build/

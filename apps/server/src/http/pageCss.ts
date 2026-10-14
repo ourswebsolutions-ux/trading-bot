@@ -1,4 +1,4 @@
-export const ADMIN_CSS = `
+export const PAGE_CSS = `
 :root{--bg:#f6f5f2;--panel:#fff;--ink:#1c1d1f;--muted:#6b6e74;--line:#e3e1dc;--line-strong:#cfccc5;--accent:#1f4e79;--accent-ink:#fff;
 --ok:#1d6b46;--ok-bg:#e8f3ec;--bad:#9b2c2c;--bad-bg:#f8e9e7;--warn:#8a5a00;--warn-bg:#fbf1dc;--mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace}
 @media (prefers-color-scheme:dark){:root{--bg:#141517;--panel:#1b1c1f;--ink:#e6e6e3;--muted:#9a9ca1;--line:#2b2d31;--line-strong:#3a3c41;--accent:#7fb2e5;--accent-ink:#0d1520;
@@ -40,4 +40,12 @@ button.danger{background:transparent;border-color:var(--bad);color:var(--bad)}bu
 .stat b{display:block;font-size:22px;font-weight:620;font-variant-numeric:tabular-nums}.stat span{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 pre.instructions{white-space:pre-wrap;font:inherit;margin:0}
 .pager{display:flex;gap:12px;justify-content:flex-end;margin-top:12px}
+`
+
+export const REVIEW_EXTRA_CSS = `
+.review{max-width:1080px;margin:0 auto}
+.review-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:6px}
+.brandline{font-weight:650;letter-spacing:.02em;color:var(--muted);font-size:13px;margin-bottom:18px}
+.action-panel.confirm{border-color:var(--ok)}.action-panel.cancel{border-color:var(--bad)}
+.lock-note{font-size:12.5px;color:var(--muted)}
 `

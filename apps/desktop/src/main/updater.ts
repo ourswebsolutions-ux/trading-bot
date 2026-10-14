@@ -4,12 +4,35 @@ import { app } from 'electron'
 import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
 import type { UpdateState } from '../shared/ipc.js'
 
+const RELEASES_PAGE = 'https://github.com/ourswebsolutions-ux/trading-bot/releases'
+
+/** Build facts recorded by electron-builder (extraMetadata) in the packaged package.json. */
+function buildInfo(): { macSigned: boolean } {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')) as { tradepilotBuild?: { macSigned?: boolean } }
+    return { macSigned: pkg.tradepilotBuild?.macSigned === true }
+  } catch {
+    return { macSigned: false }
+  }
+}
+
+/** Plain-language explanation of an electron-updater failure (the raw text goes to the log). */
+export function describeUpdateError(err: Error): string {
+  const m = err.message
+  if (/sha512 checksum mismatch|checksum/i.test(m)) return 'The downloaded update failed its integrity check and was discarded.'
+  if (/not signed by the application owner|publisherName|signature/i.test(m)) return 'The downloaded update is not signed by the expected publisher and was rejected.'
+  if (/\b404\b|No published versions|Cannot find latest|latest[-\w]*\.yml/i.test(m)) return 'No published release was found on the update feed yet.'
+  if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|net::ERR_/i.test(m)) return 'Could not reach the update server. Check the internet connection.'
+  if (/\b403\b|rate limit/i.test(m)) return 'The update server refused the request (rate limited). It will be retried later.'
+  return `Update failed: ${m.split('\n')[0]!.slice(0, 200)}.`
+}
+
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000]
 const PERIODIC_CHECK_MS = 4 * 60 * 60_000
 
 /**
  * Wraps electron-updater. Only reports what actually happened: if the build has no
- * update feed (dev builds, packages built without TRADEPILOT_UPDATE_URL, unsupported
+ * update feed (dev builds, unsigned macOS builds, unsupported
  * Linux package formats) the state is "disabled" with the reason, never a fake success.
  *
  * Integrity: electron-updater verifies the SHA-512 of every download against the
@@ -42,11 +65,15 @@ export class UpdateService {
   private disabledReason(): { reason: string | null; feedUrl: string | null } {
     if (!app.isPackaged) return { reason: 'Development build: automatic updates run only in packaged releases.', feedUrl: null }
     const configFile = path.join(process.resourcesPath, 'app-update.yml')
-    if (!existsSync(configFile)) return { reason: 'This build was packaged without an update feed (TRADEPILOT_UPDATE_URL was not set).', feedUrl: null }
+    if (!existsSync(configFile)) return { reason: 'This build was packaged without an update feed.', feedUrl: null }
+    if (process.platform === 'darwin' && !buildInfo().macSigned) {
+      return { reason: 'This macOS build is not signed with an Apple Developer ID, and macOS only installs signed updates. Download new versions from the GitHub Releases page.', feedUrl: RELEASES_PAGE }
+    }
     if (process.platform === 'linux' && !process.env.APPIMAGE && !existsSync('/usr/bin/dpkg') && !existsSync('/usr/bin/rpm')) {
       return { reason: 'Automatic updates on Linux require the AppImage, .deb or .rpm package.', feedUrl: null }
     }
-    const feedUrl = /url:\s*(\S+)/.exec(readFileSync(configFile, 'utf8'))?.[1] ?? null
+    const feed = readFileSync(configFile, 'utf8')
+    const feedUrl = /url:\s*(\S+)/.exec(feed)?.[1] ?? (/provider:\s*github/.test(feed) ? RELEASES_PAGE : null)
     return { reason: null, feedUrl }
   }
 
@@ -89,6 +116,7 @@ export class UpdateService {
     this.set({ phase: 'idle', feedUrl, message: null })
     void this.check()
     setInterval(() => void this.check(), PERIODIC_CHECK_MS).unref()
+    setInterval(() => this.maybeAutoInstall(), 60_000).unref()
   }
 
   private handleError(err: Error) {
@@ -96,7 +124,7 @@ export class UpdateService {
     this.retryIndex++
     const nextRetryAt = new Date(Date.now() + delay).toISOString()
     this.log('update error', err.message)
-    this.set({ phase: 'error', progress: null, lastCheckedAt: new Date().toISOString(), nextRetryAt, message: `Update failed: ${err.message.split('\n')[0]}. Retrying automatically.` })
+    this.set({ phase: 'error', progress: null, lastCheckedAt: new Date().toISOString(), nextRetryAt, message: `${describeUpdateError(err)} Retrying automatically.` })
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = setTimeout(() => void this.check(), delay)
     this.retryTimer.unref()
@@ -122,7 +150,7 @@ export class UpdateService {
     return this.state
   }
 
-  /** Called on lock/idle: installs a downloaded update automatically when the user opted in and nothing is running. */
+  /** Installs a downloaded update automatically when it is safe (see canAutoInstall); checked on lock and every minute. */
   maybeAutoInstall(): void {
     if (this.state.phase === 'downloaded' && this.canAutoInstall()) this.install()
   }

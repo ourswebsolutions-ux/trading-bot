@@ -171,5 +171,24 @@ CREATE TABLE server_settings (
   updated_by TEXT
 );
 `
+  },
+  {
+    version: 2,
+    name: 'email_review_links',
+    sql: `
+-- Single-use links emailed to the business address. Only the SHA-256 of each token is stored.
+CREATE TABLE review_tokens (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL REFERENCES payment_requests(id),
+  action TEXT NOT NULL CHECK (action IN ('confirm', 'cancel')),
+  token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  revoked_at TEXT,
+  CHECK (expires_at > created_at)
+);
+CREATE INDEX ix_review_tokens_request ON review_tokens(request_id);
+`
   }
 ]

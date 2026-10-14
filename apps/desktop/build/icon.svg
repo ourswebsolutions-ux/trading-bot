@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 28 28">
+  <!-- TradePilot brand mark (same geometry as BrandMark in the app), with macOS-style margin -->
+  <g transform="translate(2.8 2.8) scale(0.8)">
+    <rect x="0.75" y="0.75" width="26.5" height="26.5" rx="6.2" fill="#1f242a" stroke="#2f353d" stroke-width="1.2"/>
+    <path d="M5 18.5l4.2-4.4 3.4 2.6 4.6-6.2 2.6 2.2L23 8.5" fill="none" stroke="#d6a346" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="23" cy="8.5" r="1.8" fill="#d6a346" stroke="none"/>
+  </g>
+</svg>

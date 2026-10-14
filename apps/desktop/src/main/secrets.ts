@@ -24,19 +24,28 @@ export class SecretStore {
     return this.cipher.available()
   }
 
-  set(name: string, value: string): void {
+  /**
+   * @param allowUnencryptedFallback only for the device token: without an OS keychain the app must
+   *   still be able to register for its trial. That token only reveals this device's own status and
+   *   is rotated by the server on every re-registration. API keys never fall back.
+   */
+  set(name: string, value: string, opts: { allowUnencryptedFallback?: boolean } = {}): void {
     const avail = this.cipher.available()
-    if (!avail.ok) throw new UserError('secret_storage_unavailable', avail.reason ?? 'Secure credential storage is unavailable on this system.')
+    if (!avail.ok && !opts.allowUnencryptedFallback) {
+      throw new UserError('secret_storage_unavailable', avail.reason ?? 'Secure credential storage is unavailable on this system.')
+    }
     if (value.length > 8192) throw new UserError('validation_failed', 'Value is too long.')
+    const encrypted = avail.ok
     this.db.prepare(
-      `INSERT INTO secrets (name, ciphertext, hint, updated_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(name) DO UPDATE SET ciphertext = excluded.ciphertext, hint = excluded.hint, updated_at = excluded.updated_at`
-    ).run(name, this.cipher.encrypt(value), maskHint(value), new Date().toISOString())
+      `INSERT INTO secrets (name, ciphertext, encrypted, hint, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET ciphertext = excluded.ciphertext, encrypted = excluded.encrypted, hint = excluded.hint, updated_at = excluded.updated_at`
+    ).run(name, encrypted ? this.cipher.encrypt(value) : Buffer.from(value, 'utf8'), encrypted ? 1 : 0, maskHint(value), new Date().toISOString())
   }
 
   get(name: string): string | null {
-    const row = this.db.prepare('SELECT ciphertext FROM secrets WHERE name = ?').get(name) as { ciphertext: Uint8Array } | undefined
+    const row = this.db.prepare('SELECT ciphertext, encrypted FROM secrets WHERE name = ?').get(name) as { ciphertext: Uint8Array; encrypted: number } | undefined
     if (!row) return null
+    if (!row.encrypted) return Buffer.from(row.ciphertext).toString('utf8')
     try {
       return this.cipher.decrypt(Buffer.from(row.ciphertext))
     } catch {

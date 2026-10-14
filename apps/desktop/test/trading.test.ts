@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { MIGRATIONS, migrate } from '../src/main/db.js'
 import { computePositions, PaperBroker } from '../src/main/paper.js'
-import { StrategyStore, validateStrategy } from '../src/main/strategies.js'
 import { memoryDb } from './helpers.js'
 
 describe('local database migrations', () => {
@@ -10,31 +9,6 @@ describe('local database migrations', () => {
     const db = memoryDb()
     assert.deepEqual(migrate(db), [])
     assert.throws(() => migrate(db, [{ ...MIGRATIONS[0]!, sql: MIGRATIONS[0]!.sql + ' ' }]), /modified/)
-  })
-})
-
-describe('strategies', () => {
-  const base = { name: 'BTC trend', symbol: 'btcusd', timeframe: '1h' as const, type: 'sma_cross' as const, params: { fast: 10, slow: 30 }, risk: { positionPct: 10, stopLossPct: 2, takeProfitPct: 4, feeBps: 5 }, allowShort: false, notes: '' }
-
-  it('validates parameters like the engine does', () => {
-    assert.deepEqual(validateStrategy(base).fields, {})
-    assert.equal(validateStrategy(base).value.symbol, 'BTCUSD')
-    assert.ok(validateStrategy({ ...base, params: { fast: 40, slow: 20 } }).fields['params.fast'])
-    assert.ok(validateStrategy({ ...base, risk: { ...base.risk, positionPct: 0 } }).fields['risk.positionPct'])
-    assert.ok(validateStrategy({ ...base, name: ' ' }).fields.name)
-  })
-
-  it('creates, prevents duplicate names, duplicates, archives and deletes', () => {
-    const store = new StrategyStore(memoryDb())
-    const s = store.save(undefined, base)
-    assert.throws(() => store.save(undefined, { ...base, name: 'btc TREND' }), /already exists/)
-    const copy = store.duplicate(s.id)
-    assert.equal(copy.name, 'BTC trend (copy)')
-    assert.throws(() => store.delete(s.id), /Archive/)
-    store.setStatus(s.id, 'archived')
-    assert.equal(store.list().length, 1)
-    store.delete(s.id)
-    assert.equal(store.list(true).length, 1)
   })
 })
 

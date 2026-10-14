@@ -140,6 +140,16 @@ export class LocalAuth {
     return this.status()
   }
 
+  /** Re-confirms the password for a sensitive action (counts toward the lockout like a login). */
+  async confirmPassword(password: string): Promise<boolean> {
+    const row = this.row()
+    if (!row || !this.unlocked) return false
+    if (row.locked_until && row.locked_until > this.now().toISOString()) throw new UserError('locked_out', 'Too many incorrect attempts. Try again later.')
+    if (await verifyPassword(password, row.password_hash)) return true
+    this.registerFailure(row.failed_attempts + 1, this.now())
+    return false
+  }
+
   lock(reason: 'manual' | 'idle' | 'logout' = 'manual'): AuthStatus {
     if (this.unlocked) audit(this.db, 'auth.locked', { reason })
     this.unlocked = false

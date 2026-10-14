@@ -1,4 +1,5 @@
-import nodemailer, { type Transporter } from 'nodemailer'
+import { createSmtpTransport, sendSmtp, type SmtpSettings } from '@tradepilot/shared/smtp'
+import type { Transporter } from 'nodemailer'
 import type { SmtpConfig } from '../config.js'
 
 export interface MailMessage {
@@ -14,22 +15,15 @@ export interface Mailer {
   send(message: MailMessage): Promise<{ messageId: string }>
 }
 
+/** Uses the same SMTP module as the desktop app (packages/shared/src/smtp.ts). */
 export class SmtpMailer implements Mailer {
   readonly configured = true
+  private readonly settings: SmtpSettings
   private readonly transport: Transporter
 
   constructor(private readonly cfg: SmtpConfig) {
-    this.transport = nodemailer.createTransport({
-      host: cfg.host,
-      port: cfg.port,
-      secure: cfg.secure,
-      requireTLS: !cfg.secure && cfg.requireTLS,
-      auth: cfg.user ? { user: cfg.user, pass: cfg.password ?? '' } : undefined,
-      tls: { minVersion: 'TLSv1.2' },
-      connectionTimeout: 15_000,
-      greetingTimeout: 15_000,
-      socketTimeout: 30_000
-    })
+    this.settings = { host: cfg.host, port: cfg.port, secure: cfg.secure, requireTLS: cfg.requireTLS, user: cfg.user, password: cfg.password, from: cfg.from }
+    this.transport = createSmtpTransport(this.settings)
   }
 
   get description(): string {
@@ -38,9 +32,9 @@ export class SmtpMailer implements Mailer {
   }
 
   async send(message: MailMessage): Promise<{ messageId: string }> {
-    const info = await this.transport.sendMail({ from: this.cfg.from, to: message.to, subject: message.subject, text: message.text })
-    if (info.rejected && info.rejected.length > 0) throw new Error(`Recipient rejected: ${info.rejected.join(', ')}`)
-    return { messageId: info.messageId }
+    const result = await sendSmtp(this.settings, message, this.transport)
+    if (result.rejected.length > 0) throw new Error(`Recipient rejected: ${result.rejected.join(', ')}`)
+    return { messageId: result.messageId }
   }
 }
 

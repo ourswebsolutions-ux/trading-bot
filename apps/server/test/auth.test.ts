@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 import { hashPassword, verifyPassword } from '../src/security/passwords.js'
-import { LOCKOUT_MS, MAX_FAILED_LOGINS, SESSION_IDLE_MS } from '../src/services/admins.js'
-import { ADMIN_EMAIL, adminLogin, createAdminAccount, createHarness, registerDevice, submitPayment, type Harness } from './helpers.js'
+import { authenticateAdmin, LOCKOUT_MS, MAX_FAILED_LOGINS } from '../src/services/admins.js'
+import { createAdminAccount, createHarness, emailedLinks, registerDevice, submitPayment, submitReview, type Harness } from './helpers.js'
 
 describe('password hashing', () => {
   it('produces salted scrypt hashes that verify only the right password', async () => {
@@ -16,122 +16,60 @@ describe('password hashing', () => {
   })
 })
 
-describe('administrator authentication', () => {
+describe('administrator confirmation step on review links', () => {
   let h: Harness
   before(async () => {
     h = await createHarness()
-    await createAdminAccount(h, 'superadmin')
-    await createAdminAccount(h, 'reviewer', 'reviewer@example.test')
+    await createAdminAccount(h)
   })
   after(async () => h.close())
 
-  it('redirects anonymous visitors to sign-in and never serves evidence publicly', async () => {
+  const pending = async (note?: string) => {
     const d = await registerDevice(h)
-    const id = (await submitPayment(h, d.deviceToken)).json().request.id
-    const page = await h.app.inject({ method: 'GET', url: `/admin/requests/${id}` })
-    assert.equal(page.statusCode, 302)
-    assert.match(page.headers.location as string, /^\/admin\/login/)
-    const evidence = await h.app.inject({ method: 'GET', url: `/admin/requests/${id}/evidence` })
-    assert.equal(evidence.statusCode, 302)
-    const approve = await h.app.inject({ method: 'POST', url: `/admin/requests/${id}/approve`, payload: { verified: 'yes' } })
-    assert.equal(approve.statusCode, 401)
-  })
+    const res = await submitPayment(h, d.deviceToken, note ? { note } : {})
+    return { id: res.json().request.id as string, links: await emailedLinks(h, res.json().request.id) }
+  }
 
-  it('signs in with valid credentials and sets a hardened session cookie', async () => {
-    const { res, cookie } = await adminLogin(h)
-    assert.equal(res.statusCode, 303)
-    assert.ok(cookie.startsWith('__Host-tp_admin='))
-    const setCookie = String(res.headers['set-cookie'])
-    assert.match(setCookie, /HttpOnly/)
-    assert.match(setCookie, /Secure/)
-    assert.match(setCookie, /SameSite=Strict/)
-  })
-
-  it('rejects a wrong password and locks the account after repeated failures', async () => {
-    for (let i = 0; i < MAX_FAILED_LOGINS - 1; i++) {
-      const { res } = await adminLogin(h, 'reviewer@example.test', 'wrong password!!')
-      assert.equal(res.statusCode, 401)
-      assert.match(res.body, /Incorrect email or password/)
-    }
-    const { res: locking } = await adminLogin(h, 'reviewer@example.test', 'wrong password!!')
-    assert.match(locking.body, /temporarily locked/)
-    // even the correct password is refused while locked
-    const { res: blocked } = await adminLogin(h, 'reviewer@example.test')
-    assert.equal(blocked.statusCode, 401)
+  it('locks an administrator account after repeated wrong passwords', async () => {
+    for (let i = 0; i < MAX_FAILED_LOGINS - 1; i++) assert.equal((await authenticateAdmin(h.ctx, 'owner@example.test', 'nope-nope-nope', null)).ok, false)
+    const locked = await authenticateAdmin(h.ctx, 'owner@example.test', 'nope-nope-nope', null)
+    assert.equal(locked.ok, false)
+    assert.equal(!locked.ok && locked.reason, 'locked')
+    assert.equal((await authenticateAdmin(h.ctx, 'owner@example.test', 'correct horse battery staple', null)).ok, false, 'even the right password while locked')
     h.clock.advance(LOCKOUT_MS + 1)
-    const { cookie } = await adminLogin(h, 'reviewer@example.test')
-    assert.ok(cookie)
+    assert.equal((await authenticateAdmin(h.ctx, 'owner@example.test', 'correct horse battery staple', null)).ok, true)
   })
 
-  it('rate-limits sign-in attempts per IP address', async () => {
-    const statuses: number[] = []
-    for (let i = 0; i < 11; i++) statuses.push((await adminLogin(h, 'nobody@example.test', 'guess-guess-guess', '192.0.2.77')).res.statusCode)
-    assert.deepEqual(statuses.slice(0, 10), Array(10).fill(401))
-    assert.equal(statuses[10], 429)
+  it('does not reveal whether an administrator account exists', async () => {
+    const { links } = await pending()
+    const r = await submitReview(h, links.confirm, { verified: 'yes' }, { email: 'nobody@example.test' })
+    assert.equal(r.res.statusCode, 401)
+    assert.match(r.res.body, /Incorrect administrator email or password/)
   })
 
-  it('does not reveal whether an account exists', async () => {
-    const { res } = await adminLogin(h, 'nobody@example.test', 'whatever password')
-    assert.equal(res.statusCode, 401)
-    assert.match(res.body, /Incorrect email or password/)
+  it('rate-limits decision attempts per IP address', async () => {
+    const { links } = await pending()
+    const codes: number[] = []
+    for (let i = 0; i < 11; i++) codes.push((await submitReview(h, links.confirm, { verified: 'yes' }, { password: 'wrong-password-x', remoteAddress: '192.0.2.50' })).res.statusCode)
+    assert.equal(codes[10], 429)
   })
 
-  it('requires a valid CSRF token on login and on admin actions', async () => {
-    const noToken = await h.app.inject({ method: 'POST', url: '/admin/login', payload: { email: ADMIN_EMAIL, password: 'x' } })
-    assert.equal(noToken.statusCode, 403)
-
-    const { cookie } = await adminLogin(h)
-    const d = await registerDevice(h)
-    const id = (await submitPayment(h, d.deviceToken)).json().request.id
-    const forged = await h.app.inject({ method: 'POST', url: `/admin/requests/${id}/approve`, headers: { cookie }, payload: { _csrf: 'forged', verified: 'yes' } })
-    assert.equal(forged.statusCode, 403)
-    assert.equal(h.ctx.db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(id)!.status, 'pending')
+  it('serves review pages with no-store, a strict CSP and no referrer', async () => {
+    const { links } = await pending()
+    const page = await h.app.inject({ method: 'GET', url: links.confirm })
+    assert.equal(page.headers['cache-control'], 'no-store')
+    assert.match(String(page.headers['content-security-policy']), /default-src 'none'/)
+    assert.match(page.body, /name="referrer" content="no-referrer"/)
   })
 
-  it('rejects cross-origin form posts', async () => {
-    const { cookie, csrf } = await adminLogin(h)
-    const res = await h.app.inject({
-      method: 'POST', url: '/admin/settings', headers: { cookie, origin: 'https://evil.example' },
-      payload: { _csrf: csrf, notifyEmail: 'x@example.test', paymentInstructions: 'pay me please now' }
-    })
-    assert.equal(res.statusCode, 403)
-  })
-
-  it('enforces roles: reviewers cannot change settings or read the audit log', async () => {
-    const { cookie } = await adminLogin(h, 'reviewer@example.test')
-    assert.equal((await h.app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } })).statusCode, 403)
-    assert.equal((await h.app.inject({ method: 'GET', url: '/admin/audit', headers: { cookie } })).statusCode, 403)
-    assert.equal((await h.app.inject({ method: 'GET', url: '/admin', headers: { cookie } })).statusCode, 200)
-  })
-
-  it('expires idle sessions and invalidates the session on logout', async () => {
-    const { cookie, csrf } = await adminLogin(h)
-    h.clock.advance(SESSION_IDLE_MS + 1)
-    assert.equal((await h.app.inject({ method: 'GET', url: '/admin', headers: { cookie } })).statusCode, 302)
-
-    const fresh = await adminLogin(h)
-    const out = await h.app.inject({ method: 'POST', url: '/admin/logout', headers: { cookie: fresh.cookie }, payload: { _csrf: fresh.csrf } })
-    assert.equal(out.statusCode, 303)
-    assert.equal((await h.app.inject({ method: 'GET', url: '/admin', headers: { cookie: fresh.cookie } })).statusCode, 302)
-    void csrf
-  })
-
-  it('sends a real SMTP test email and reports the outcome', async () => {
-    const { cookie, csrf } = await adminLogin(h)
-    const ok = await h.app.inject({ method: 'POST', url: '/admin/settings/test-email', headers: { cookie }, payload: { _csrf: csrf, to: 'ops@example.test' } })
-    assert.match(ok.body, /accepted by the SMTP server/)
-    assert.equal(h.mailer.sent.at(-1)!.to, 'ops@example.test')
-    h.mailer.failNext = true
-    const bad = await h.app.inject({ method: 'POST', url: '/admin/settings/test-email', headers: { cookie }, payload: { _csrf: csrf, to: 'ops@example.test' } })
-    assert.match(bad.body, /was not sent: simulated SMTP failure/)
-  })
-
-  it('escapes user-supplied content in admin pages', async () => {
-    const d = await registerDevice(h)
-    const res = await submitPayment(h, d.deviceToken, { note: '<script>alert(1)</script>' })
-    const { cookie } = await adminLogin(h)
-    const page = await h.app.inject({ method: 'GET', url: `/admin/requests/${res.json().request.id}`, headers: { cookie } })
+  it('escapes client-supplied content on the review page', async () => {
+    const { links } = await pending('<script>alert(1)</script>')
+    const page = await h.app.inject({ method: 'GET', url: links.cancel })
     assert.ok(!page.body.includes('<script>alert(1)</script>'))
     assert.ok(page.body.includes('&lt;script&gt;alert(1)&lt;/script&gt;'))
+  })
+
+  it('no longer exposes an administrator dashboard', async () => {
+    for (const url of ['/admin', '/admin/login', '/admin/settings', '/admin/audit']) assert.equal((await h.app.inject({ method: 'GET', url })).statusCode, 404, url)
   })
 })

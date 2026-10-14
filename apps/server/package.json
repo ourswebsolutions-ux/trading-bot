@@ -12,7 +12,9 @@
     "admin:create": "tsx --env-file-if-exists=.env src/cli/create-admin.ts",
     "db:migrate": "tsx --env-file-if-exists=.env src/cli/migrate.ts",
     "db:backup": "tsx --env-file-if-exists=.env src/cli/backup.ts",
-    "keys:generate": "tsx src/cli/generate-keys.ts"
+    "keys:generate": "tsx src/cli/generate-keys.ts",
+    "review:resend": "tsx --env-file-if-exists=.env src/cli/review-resend.ts",
+    "smtp:test": "tsx --env-file-if-exists=.env src/cli/smtp-test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",

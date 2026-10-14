@@ -44,10 +44,25 @@ export function CandleChart({ candles, height = 300, markers = [] }: { candles: 
   const [hover, setHover] = useState<number | null>(null)
   const view = useMemo(() => {
     const plotW = Math.max(0, width - PAD.l - PAD.r)
-    // keep candles legible: show at most one per 3px
+    if (!candles.length || plotW <= 0) return null
+    // Keep candles legible (≥3px each) by merging neighbours into wider OHLC buckets,
+    // so the whole requested range stays visible instead of being cropped.
     const maxBars = Math.max(10, Math.floor(plotW / 3))
-    const data = candles.slice(-maxBars)
-    if (!data.length || plotW <= 0) return null
+    const per = Math.ceil(candles.length / maxBars)
+    const data: Candle[] = []
+    const bucketOf = new Map<number, number>()
+    for (let i = 0; i < candles.length; i += per) {
+      const group = candles.slice(i, i + per)
+      for (const c of group) bucketOf.set(c.time, data.length)
+      data.push({
+        time: group[0]!.time,
+        open: group[0]!.open,
+        high: Math.max(...group.map((c) => c.high)),
+        low: Math.min(...group.map((c) => c.low)),
+        close: group.at(-1)!.close,
+        volume: group.reduce((a, c) => a + c.volume, 0)
+      })
+    }
     const lo = Math.min(...data.map((c) => c.low))
     const hi = Math.max(...data.map((c) => c.high))
     const padY = (hi - lo) * 0.06 || hi * 0.01
@@ -57,16 +72,15 @@ export function CandleChart({ candles, height = 300, markers = [] }: { candles: 
     const bw = plotW / data.length
     const x = (i: number) => PAD.l + i * bw + bw / 2
     const y = (v: number) => PAD.t + (1 - (v - yMin) / (yMax - yMin)) * plotH
-    return { data, bw, x, y, yTicks: ticks(yMin, yMax, 5), plotW, plotH, span: data.at(-1)!.time - data[0]!.time }
+    return { data, bucketOf, bw, x, y, yTicks: ticks(yMin, yMax, 5), plotW, plotH, span: data.at(-1)!.time - data[0]!.time }
   }, [candles, width, height])
 
   if (!view) return <div ref={ref} className="chart" style={{ height }} />
-  const { data, bw, x, y, yTicks, span } = view
+  const { data, bucketOf, bw, x, y, yTicks, span } = view
   const xTickEvery = Math.max(1, Math.ceil(data.length / Math.max(2, Math.floor(view.plotW / 110))))
   const hc = hover !== null ? data[hover] : null
   const last = data.at(-1)!
   const lastUp = last.close >= last.open
-  const index = new Map(data.map((c, i) => [c.time, i]))
 
   return (
     <div ref={ref} className="chart" style={{ height }}>
@@ -86,7 +100,7 @@ export function CandleChart({ candles, height = 300, markers = [] }: { candles: 
         </g>
         <g className="axis">
           {yTicks.map((t) => <text key={t} x={width - PAD.r + 8} y={y(t) + 3.5}>{fmtPrice(t)}</text>)}
-          {data.map((c, i) => (i % xTickEvery === 0 ? <text key={c.time} x={x(i)} y={height - 6} textAnchor="middle">{timeLabel(c.time, span)}</text> : null))}
+          {data.map((c, i) => (i % xTickEvery === 0 && x(i) > 28 && x(i) < width - PAD.r - 24 ? <text key={c.time} x={x(i)} y={height - 6} textAnchor="middle">{timeLabel(c.time, span)}</text> : null))}
         </g>
         {data.map((c, i) => {
           const up = c.close >= c.open
@@ -102,7 +116,7 @@ export function CandleChart({ candles, height = 300, markers = [] }: { candles: 
           )
         })}
         {markers.map((m, k) => {
-          const i = index.get(m.time)
+          const i = bucketOf.get(m.time)
           if (i === undefined) return null
           const cx = x(i)
           const cy = y(m.price)
@@ -180,7 +194,7 @@ export function LineChart({ points, height = 220, format = (v: number) => v.toFi
         <g className="grid">{yTicks.map((t) => <line key={t} x1={PAD.l} x2={width - PAD.r} y1={y(t)} y2={y(t)} />)}</g>
         <g className="axis">
           {yTicks.map((t) => <text key={t} x={width - PAD.r + 8} y={y(t) + 3.5}>{format(t)}</text>)}
-          {points.map((p, i) => (i % step === 0 ? <text key={i} x={x(p[0])} y={height - 6} textAnchor="middle">{timeLabel(p[0], t1 - t0)}</text> : null))}
+          {points.map((p, i) => (i % step === 0 && x(p[0]) > 28 && x(p[0]) < width - PAD.r - 24 ? <text key={i} x={x(p[0])} y={height - 6} textAnchor="middle">{timeLabel(p[0], t1 - t0)}</text> : null))}
         </g>
         {baseline !== undefined && <line x1={PAD.l} x2={width - PAD.r} y1={y(baseline)} y2={y(baseline)} stroke="var(--text-3)" strokeDasharray="3 4" />}
         <path d={area} fill="url(#lc-fill)" />

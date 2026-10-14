@@ -1,0 +1,45 @@
+name: CI
+
+# Static checks, unit/integration tests (server, desktop, Python engine) and production builds.
+# Also called by the release workflow, so a release can only be built from a commit that passes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Lint, typecheck, tests, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint (type checking + Python syntax)
+        run: npm run lint
+      - name: Server tests
+        run: npm run test -w @tradepilot/server
+      - name: Desktop tests
+        run: npm run test -w @tradepilot/desktop
+      - name: Engine tests
+        run: npm run test:engine
+      - name: Production build (server + desktop)
+        run: npm run build
+      - name: Dependency audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high

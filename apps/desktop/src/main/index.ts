@@ -5,10 +5,24 @@ import { audit, getSetting, openDatabase, setSetting, type Db } from './db.js'
 import { EngineBridge } from './engine.js'
 import { UserError } from './errors.js'
 import { machineFingerprint } from './fingerprint.js'
+import { AiUsageTracker } from './ai/provider.js'
+import { AnthropicProvider } from './ai/anthropic.js'
+import { OpenAiProvider } from './ai/openai.js'
+import { interpretTurn } from './ai/strategyInterpreter.js'
+import { ConsentStore } from './channels/whatsapp.js'
+import { DeltaAccountService } from './delta/account.js'
 import { IntegrationService } from './integrations.js'
+import { aiSettings, buildIntegrationSpecs, DEFAULT_OPENAI_MODEL, deltaRegion, marketSettings, migrateIntegrationConfig } from './integrationSpecs.js'
+import { DEFAULT_ANTHROPIC_MODEL } from './ai/anthropic.js'
+import { redact, redactValue } from './redact.js'
+import { AutomationService } from './trading/automation.js'
+import { AlertDispatcher } from './trading/alerts.js'
+import { DeltaExchange, PaperExchange } from './trading/exchange.js'
+import { DeltaRest } from './delta/rest.js'
+import { DELTA_REGIONS } from './delta/regions.js'
 import { createIpcRegistry, v } from './ipc.js'
 import { LocalAuth } from './localAuth.js'
-import { MAX_DAYS, MarketData } from './market.js'
+import { MAX_DAYS, MarketDataService } from './marketData.js'
 import { NotificationCenter } from './notifications.js'
 import { PaperBroker } from './paper.js'
 import { SecretStore, type SecretCipher } from './secrets.js'
@@ -16,7 +30,9 @@ import { StrategyStore } from './strategies.js'
 import { SubscriptionService } from './subscription.js'
 import { UpdateService } from './updater.js'
 import { loadDesktopConfig } from './config.js'
-import type { BacktestMetrics, BacktestTrade, EventContract, EventName, GeneralPreferences, IntegrationId, StrategyInput, Timeframe } from '../shared/ipc.js'
+import type { AiPreferences, BacktestMetrics, BacktestTrade, ChatMessage, EventContract, EventName, GeneralPreferences, IntegrationId, Timeframe } from '../shared/ipc.js'
+import type { StrategyDefinition } from '../shared/strategyRules.js'
+import { DEFAULT_RISK } from '../shared/tradingRisk.js'
 
 // Development/test-only switches; packaged builds ignore them.
 const E2E_HIDDEN = !app.isPackaged && process.env.TRADEPILOT_E2E_HIDDEN === '1'
@@ -24,9 +40,10 @@ if (!app.isPackaged && process.env.TRADEPILOT_USER_DATA_DIR) app.setPath('userDa
 
 if (!app.requestSingleInstanceLock()) app.quit()
 
-const INTEGRATION_IDS: IntegrationId[] = ['delta', 'openai', 'anthropic', 'smtp', 'whatsapp']
+const INTEGRATION_IDS: IntegrationId[] = ['delta', 'openai', 'anthropic', 'smtp', 'whatsapp', 'marketdata']
 const TIMEFRAMES: Timeframe[] = ['5m', '15m', '1h', '4h', '1d']
 const DEFAULT_PREFS: GeneralPreferences = {
+  welcomeSound: true,
   theme: 'dark',
   autoLockMinutes: 15,
   desktopNotifications: true,
@@ -38,7 +55,8 @@ const DEFAULT_PREFS: GeneralPreferences = {
 let mainWindow: BrowserWindow | null = null
 const logDir = () => path.join(app.getPath('userData'), 'logs')
 function log(msg: string, extra?: unknown) {
-  const line = `${new Date().toISOString()} ${msg}${extra !== undefined ? ` ${typeof extra === 'string' ? extra : JSON.stringify(extra)}` : ''}\n`
+  // every log line passes through the redactor: no credentials in logs
+  const line = `${new Date().toISOString()} ${redact(msg)}${extra !== undefined ? ` ${redactValue(extra)}` : ''}\n`
   try {
     mkdirSync(logDir(), { recursive: true })
     appendFileSync(path.join(logDir(), 'main.log'), line)
@@ -86,7 +104,25 @@ async function bootstrap() {
   }
 
   const secrets = new SecretStore(db, cipher)
-  const integrations = new IntegrationService(db, secrets)
+  const usage = new AiUsageTracker(db)
+  const consents = new ConsentStore(db)
+  let market: MarketDataService
+  const integrations: IntegrationService = new IntegrationService(
+    db,
+    secrets,
+    buildIntegrationSpecs({ integrations: () => integrations, market: () => market, usage, consents, defaultSymbol: () => prefs().defaultSymbol }),
+    (id, step) => emit('integrations:progress', { id, step }),
+    migrateIntegrationConfig
+  )
+  market = new MarketDataService({
+    region: () => deltaRegion(integrations.config('delta')),
+    settings: () => marketSettings(integrations.config('marketdata')),
+    onSnapshot: (snap) => emit('market:changed', snap),
+    onCandle: (c) => emit('market:candle', c),
+    log
+  })
+  market.start()
+  const account = new DeltaAccountService(integrations)
   const notifications = new NotificationCenter(
     db,
     (unread) => emit('notifications:changed', { unread }),
@@ -110,19 +146,90 @@ async function bootstrap() {
     }
   })
 
-  const market = new MarketData(() => integrations.config('delta').baseUrl ?? 'https://api.india.delta.exchange')
   const paper = new PaperBroker(db, (s) => market.markPrice(s))
-  const strategies = new StrategyStore(db)
+  const strategies = new StrategyStore(db, async () => ({ instruments: await market.instruments().then((l) => l.map((i) => i.symbol)).catch(() => null) }))
   const engineDir = app.isPackaged ? path.join(process.resourcesPath, 'engine') : path.resolve(app.getAppPath(), '../../engine')
-  const engine = new EngineBridge(engineDir, () => prefs().pythonPath, (s) => emit('engine:changed', s))
+  const bundledEngine = app.isPackaged ? path.join(engineDir, 'bin', process.platform === 'win32' ? 'tradepilot-engine.exe' : 'tradepilot-engine') : null
+  const engine = new EngineBridge(engineDir, () => prefs().pythonPath, (s) => emit('engine:changed', s), bundledEngine)
+
+  // ---------------- automated trading (Phase 4) ----------------
+  const alerts = new AlertDispatcher(integrations, consents, notifications, log)
+  const deltaRest = (): DeltaRest | null => {
+    if (!integrations.isConfigured('delta')) return null
+    return new DeltaRest(deltaRegion(integrations.config('delta')), { apiKey: integrations.secret('delta', 'apiKey')!, apiSecret: integrations.secret('delta', 'apiSecret')! })
+  }
+  let instrumentsCache: Awaited<ReturnType<typeof market.instruments>> = []
+  const liveChecks = () => {
+    const delta = integrations.view('delta')
+    const recent = delta.lastSuccessAt && Date.now() - Date.parse(delta.lastSuccessAt) < 24 * 3600_000
+    const region = DELTA_REGIONS[deltaRegion(integrations.config('delta'))]
+    return [
+      { id: 'delta', label: 'Delta Exchange connected', ok: delta.state === 'connected' && Boolean(recent), detail: delta.state === 'connected' && recent ? `Last successful test ${new Date(delta.lastSuccessAt!).toLocaleString()}.` : 'Run a successful Delta Exchange connection test (Settings → Delta Exchange) within the last 24 hours.' },
+      { id: 'risk', label: 'Account risk settings configured', ok: automation.risk().configured, detail: automation.risk().configured ? 'Risk limits saved.' : 'Save the account risk settings.' },
+      { id: 'emergency', label: 'Emergency stop not active', ok: !automation.emergency().active, detail: automation.emergency().active ? 'Clear the emergency stop first.' : 'OK.' },
+      { id: 'region', label: region.testnet ? 'Testnet (demo) account' : 'Production account — real money', ok: true, detail: region.label }
+    ]
+  }
+  let tradingEmitPending = false
+  const automation: AutomationService = new AutomationService({
+    db,
+    engine: (method, params) => engine.request(method, params, 30_000),
+    strategy: async (id) => strategies.get(id).catch(() => null),
+    validate: (d) => strategies.validate(d),
+    candles: (symbol, tf, days) => market.candles(symbol, tf, days),
+    instruments: async () => (instrumentsCache = await market.instruments(true)),
+    markPrice: (symbol) => market.markPrice(symbol),
+    liveExchange: () => {
+      const rest = deltaRest()
+      return rest ? new DeltaExchange(rest) : null
+    },
+    paperExchange: new PaperExchange(
+      (symbol) => market.markPrice(symbol),
+      (symbol) => instrumentsCache.find((i) => i.symbol === symbol)?.contractValue ?? 0,
+      () => 5,
+      () => automation.risk().paperSlippageBps
+    ),
+    liveAccount: async () => {
+      const rest = deltaRest()
+      if (!rest) throw new UserError('not_configured', 'Delta Exchange is not configured.')
+      const balances = await rest.balances()
+      const settle = instrumentsCache.find((i) => automation.activeSymbols().includes(i.symbol))?.settlingAsset ?? 'USD'
+      const b = balances.find((x) => x.asset_symbol === settle) ?? balances.find((x) => x.asset_symbol === 'USD') ?? balances[0]
+      return { equity: b?.balance ?? 0, available: b?.available_balance ?? null }
+    },
+    liveChecks,
+    region: () => {
+      const r = DELTA_REGIONS[deltaRegion(integrations.config('delta'))]
+      return { id: r.id, label: r.label, testnet: r.testnet }
+    },
+    watchSymbols: (symbols) => void market.watch('automation', symbols),
+    alert: (a) => alerts.send(a),
+    onChange: () => {
+      if (tradingEmitPending) return
+      tradingEmitPending = true
+      setTimeout(() => {
+        tradingEmitPending = false
+        void tradingOverview().then((o) => emit('trading:changed', o)).catch(() => undefined)
+      }, 300)
+    },
+    log
+  })
+  const currentMarks = () => {
+    const marks: Record<string, number | undefined> = {}
+    for (const [sym, q] of Object.entries(market.snapshot().quotes)) marks[sym] = q.markPrice ?? q.lastPrice ?? undefined
+    return marks
+  }
+  const tradingOverview = async () => automation.overview(currentMarks())
+  void market.instruments().then((l) => (instrumentsCache = l)).catch(() => undefined)
+  automation.startScheduler()
 
   const updates = new UpdateService(
     (s) => {
       emit('updates:changed', s)
       if (s.phase === 'downloaded') notifications.add({ category: 'update', severity: 'info', title: `Update ${s.availableVersion} ready`, body: 'Restart TradePilot to install it, or it will install automatically when you quit.', native: true })
     },
-    // Safe to restart only when the user opted in and the session is locked (nobody is mid-task).
-    () => prefs().autoInstallUpdates && !auth.isUnlocked(),
+    // Safe to restart only when the user opted in, the session is locked and nobody has touched the computer for 2 minutes.
+    () => prefs().autoInstallUpdates && !auth.isUnlocked() && powerMonitor.getSystemIdleTime() >= 120,
     log
   )
 
@@ -152,6 +259,7 @@ async function bootstrap() {
   }
 
   ipc.handle('app:info', () => ({
+    welcomeSound: prefs().welcomeSound,
     version: app.getVersion(),
     platform: `${process.platform}-${process.arch}`,
     packaged: app.isPackaged,
@@ -241,6 +349,7 @@ async function bootstrap() {
       if (!p) throw new UserError('validation_failed', 'Python path is required.', { pythonPath: 'Required' })
       next.pythonPath = p
     }
+    if (o.welcomeSound !== undefined) next.welcomeSound = Boolean(o.welcomeSound)
     if (o.defaultSymbol !== undefined) {
       const s = v.str(o.defaultSymbol, 32).trim().toUpperCase()
       if (!/^[A-Z0-9_]{2,32}$/.test(s)) throw new UserError('validation_failed', 'Invalid symbol.', { defaultSymbol: 'Invalid symbol' })
@@ -261,29 +370,63 @@ async function bootstrap() {
     const id = v.oneOf(o.id, INTEGRATION_IDS)
     const view = integrations.save({ id, config: v.strRecord(o.config ?? {}), secrets: v.strRecord(o.secrets ?? {}) })
     audit(db, 'integration.saved', { id })
+    if (id === 'delta' || id === 'marketdata') market.applySettings()
+    if (id === 'delta') account.invalidate()
     return view
   })
   ipc.handle('integrations:test', async (req) => {
     const id = v.oneOf(v.obj(req).id, INTEGRATION_IDS)
-    const view = await integrations.test(id)
-    audit(db, 'integration.tested', { id, state: view.state })
+    const { view, result } = await integrations.run(id, 'test')
+    audit(db, 'integration.tested', { id, ok: result.ok })
     return view
+  })
+  ipc.handle('integrations:action', async (req) => {
+    const o = v.obj(req)
+    const id = v.oneOf(o.id, INTEGRATION_IDS)
+    const action = v.str(o.action, 40)
+    const params = o.params === undefined ? {} : v.obj(o.params)
+    const out = await integrations.run(id, action, params)
+    audit(db, 'integration.action', { id, action, ok: out.result.ok })
+    if (id === 'delta') account.invalidate()
+    return out
   })
   ipc.handle('integrations:clear', (req) => {
     const id = v.oneOf(v.obj(req).id, INTEGRATION_IDS)
     audit(db, 'integration.cleared', { id })
-    return integrations.clear(id)
+    const view = integrations.clear(id)
+    if (id === 'delta' || id === 'marketdata') market.applySettings()
+    if (id === 'delta') account.invalidate()
+    return view
   })
 
-  // Viewing saved strategies is always allowed; creating, editing and running them is a paid feature.
-  ipc.handle('strategies:list', (req) => strategies.list(Boolean(req && v.obj(req).includeArchived)))
+  // Viewing, disabling and deleting strategies is always allowed; creating, editing, enabling and running them is a paid feature.
+  const definitionArg = (x: unknown) => {
+    const d = v.obj(x) as unknown as StrategyDefinition
+    if (JSON.stringify(d).length > 64_000) throw new UserError('validation_failed', 'The strategy definition is too large.')
+    return d
+  }
+  ipc.handle('strategies:list', () => strategies.list())
+  ipc.handle('strategies:get', (req) => strategies.get(v.str(v.obj(req).id, 64)))
+  ipc.handle('strategies:validate', (req) => strategies.validate(definitionArg(v.obj(req).definition)))
   ipc.handle('strategies:save', (req) => {
     subscription.requireAccess('Editing strategies')
     const o = v.obj(req)
-    return strategies.save(v.optStr(o.id, 64), v.obj(o.input) as unknown as StrategyInput)
+    const source = o.source === 'ai' ? 'ai' : 'manual'
+    return strategies.save(v.optStr(o.id, 64), definitionArg(o.definition), {
+      source,
+      aiProvider: source === 'ai' ? v.oneOf(o.aiProvider, ['openai', 'anthropic'] as const) : undefined,
+      prompt: v.optStr(o.prompt, 8000),
+      changeRequest: v.optStr(o.changeRequest, 4000)
+    })
   })
-  ipc.handle('strategies:archive', (req) => strategies.setStatus(v.str(v.obj(req).id, 64), 'archived'))
-  ipc.handle('strategies:restore', (req) => strategies.setStatus(v.str(v.obj(req).id, 64), 'draft'))
+  ipc.handle('strategies:versions', (req) => strategies.versions(v.str(v.obj(req).id, 64)))
+  ipc.handle('strategies:activity', (req) => automation.strategyActivity(v.str(v.obj(req).id, 64), currentMarks()))
+  ipc.handle('strategies:setEnabled', (req) => {
+    const o = v.obj(req)
+    const enabled = o.enabled === true
+    if (enabled) subscription.requireAccess('Enabling strategies')
+    return strategies.setEnabled(v.str(o.id, 64), enabled)
+  })
   ipc.handle('strategies:delete', (req) => {
     const id = v.str(v.obj(req).id, 64)
     strategies.delete(id)
@@ -296,17 +439,19 @@ async function bootstrap() {
   ipc.handle('strategies:backtest', async (req) => {
     subscription.requireAccess('Backtesting')
     const o = v.obj(req)
-    const s = strategies.get(v.str(o.id, 64))
-    const days = Math.round(v.num(o.days, 1, MAX_DAYS[s.timeframe]))
-    const candles = await market.candles(s.symbol, s.timeframe, days)
-    if (candles.length < 30) throw new UserError('insufficient_data', `Only ${candles.length} candles are available for ${s.symbol} ${s.timeframe}; at least 30 are needed.`)
-    const result = await engine.request<{ metrics: BacktestMetrics; trades: BacktestTrade[]; equityCurve: [number, number][] }>('backtest', {
-      strategy: { type: s.type, params: s.params, risk: s.risk, allowShort: s.allowShort },
-      candles
-    })
-    const runId = strategies.recordBacktest(s.id, s.symbol, s.timeframe, candles[0]!.time, candles.at(-1)!.time, result.metrics)
-    audit(db, 'strategy.backtested', { id: s.id, runId, bars: candles.length })
-    return { runId, strategyId: s.id, symbol: s.symbol, timeframe: s.timeframe, candles, ...result }
+    const s = await strategies.get(v.str(o.id, 64))
+    if (!s.validation.valid) throw new UserError('strategy_invalid', `Fix the strategy before backtesting: ${s.validation.errors[0]!.message}`)
+    const tf = s.timeframe!
+    const days = Math.round(v.num(o.days, 1, MAX_DAYS[tf]))
+    const slippageBps = o.slippageBps === undefined ? 0 : v.num(o.slippageBps, 0, 500)
+    const feeBps = o.feeBps === undefined ? s.definition.risk.feeBps : v.num(o.feeBps, 0, 100)
+    const initialEquity = o.initialEquity === undefined ? 10_000 : v.num(o.initialEquity, 100, 1e9)
+    const candles = await market.candles(s.symbol, tf, days)
+    if (candles.length < 30) throw new UserError('insufficient_data', `Only ${candles.length} candles are available for ${s.symbol} ${tf}; at least 30 are needed.`)
+    const result = await engine.request<{ metrics: BacktestMetrics; trades: BacktestTrade[]; equityCurve: [number, number][] }>('backtest_rules', { definition: s.definition, candles, feeBps, slippageBps, initialEquity })
+    const runId = strategies.recordBacktest(s.id, s.symbol, tf, candles[0]!.time, candles.at(-1)!.time, result.metrics, s.version)
+    audit(db, 'strategy.backtested', { id: s.id, version: s.version, runId, bars: candles.length, feeBps, slippageBps })
+    return { runId, strategyId: s.id, symbol: s.symbol, timeframe: tf, candles, ...result }
   })
 
   ipc.handle('engine:status', () => engine.getStatus())
@@ -316,7 +461,125 @@ async function bootstrap() {
     const symbols = req ? (v.obj(req).symbols as unknown) : undefined
     return market.tickers(Array.isArray(symbols) ? symbols.slice(0, 50).map((s) => v.str(s, 32)) : undefined)
   })
-  ipc.handle('market:symbols', async () => (await market.allTickers()).map((t) => t.symbol))
+  ipc.handle('market:symbols', async () => (await market.instruments()).map((i) => i.symbol))
+  ipc.handle('market:instruments', (req) => market.instruments(Boolean(req && v.obj(req).refresh)))
+  // Public market data (no credentials) is also available on the login screen.
+  ipc.handle('market:snapshot', () => market.snapshot(), { auth: false })
+  ipc.handle('market:watch', (req) => {
+    const o = v.obj(req)
+    const symbols = Array.isArray(o.symbols) ? o.symbols.slice(0, 50).map((s) => v.str(s, 32)) : []
+    const chart = o.chart ? v.obj(o.chart) : null
+    return market.watch(v.str(o.view, 40), symbols, chart ? { symbol: v.str(chart.symbol, 32), timeframe: v.oneOf(chart.timeframe, TIMEFRAMES) } : null)
+  }, { auth: false })
+  ipc.handle('market:unwatch', (req) => market.unwatch(v.str(v.obj(req).view, 40)), { auth: false })
+  ipc.handle('market:series', (req) => {
+    const o = v.obj(req)
+    const tf = v.oneOf(o.timeframe, TIMEFRAMES)
+    return market.series(v.str(o.symbol, 32), tf, Math.round(v.num(o.days, 1, MAX_DAYS[tf])))
+  }, { auth: false })
+
+  // ---- automated trading controls ----
+  ipc.handle('trading:overview', () => tradingOverview())
+  ipc.handle('trading:saveRisk', async (req) => {
+    const o = v.obj(req)
+    automation.saveRisk({
+      configured: true,
+      maxExposurePct: v.num(o.maxExposurePct, -1e12, 1e12),
+      maxOpenPositions: v.num(o.maxOpenPositions, -1e12, 1e12),
+      accountMaxDailyLossPct: v.num(o.accountMaxDailyLossPct, -1e12, 1e12),
+      maxOrderNotionalUsd: v.num(o.maxOrderNotionalUsd, -1e12, 1e12),
+      paperStartingEquity: v.num(o.paperStartingEquity, -1e12, 1e12),
+      paperSlippageBps: o.paperSlippageBps === undefined ? DEFAULT_RISK.paperSlippageBps : v.num(o.paperSlippageBps, -1e12, 1e12),
+      emergencyAction: v.oneOf(o.emergencyAction, ['close_positions', 'keep_positions'] as const)
+    })
+    return tradingOverview()
+  })
+  ipc.handle('trading:enableLive', async (req) => {
+    subscription.requireAccess('Live trading')
+    const o = v.obj(req)
+    if (v.str(o.confirmation, 40) !== 'ENABLE LIVE TRADING') throw new UserError('validation_failed', 'Type ENABLE LIVE TRADING to confirm.', { confirmation: 'Type ENABLE LIVE TRADING' })
+    if (!(await auth.confirmPassword(v.str(o.password, 1024)))) throw new UserError('invalid_password', 'Incorrect password.', { password: 'Incorrect password' })
+    automation.setLive(true)
+    return tradingOverview()
+  })
+  ipc.handle('trading:disableLive', async () => {
+    automation.setLive(false)
+    return tradingOverview()
+  })
+  ipc.handle('trading:emergencyStop', async () => {
+    await automation.emergencyStop()
+    return tradingOverview()
+  })
+  ipc.handle('trading:clearEmergency', async () => {
+    automation.clearEmergency()
+    return tradingOverview()
+  })
+  ipc.handle('automation:start', async (req) => {
+    subscription.requireAccess('Automated trading')
+    const o = v.obj(req)
+    await automation.start(v.str(o.strategyId, 64), v.oneOf(o.mode, ['paper', 'live'] as const))
+    return tradingOverview()
+  })
+  ipc.handle('automation:pause', async (req) => {
+    automation.pause(v.str(v.obj(req).sessionId, 64))
+    return tradingOverview()
+  })
+  ipc.handle('automation:resume', async (req) => {
+    subscription.requireAccess('Automated trading')
+    await automation.resume(v.str(v.obj(req).sessionId, 64))
+    return tradingOverview()
+  })
+  ipc.handle('automation:applyVersion', async (req) => {
+    subscription.requireAccess('Automated trading')
+    await automation.applyLatestVersion(v.str(v.obj(req).sessionId, 64))
+    return tradingOverview()
+  })
+  ipc.handle('automation:stop', async (req) => {
+    const o = v.obj(req)
+    await automation.stop(v.str(o.sessionId, 64), o.closePosition === true)
+    return tradingOverview()
+  })
+
+  ipc.handle('account:summary', (req) => account.summary(Boolean(req && v.obj(req).refresh)))
+  ipc.handle('account:orders', () => account.orders())
+
+  // The AI proposes rules in a conversation; nothing is saved until the client reviews and confirms it in the UI.
+  ipc.handle('ai:interpretStrategy', async (req) => {
+    subscription.requireAccess('AI strategy interpretation')
+    const o = v.obj(req)
+    const provider = o.provider === undefined ? chooseAiProvider() : v.oneOf(o.provider, ['openai', 'anthropic'] as const)
+    if (!integrations.isConfigured(provider)) throw new UserError('not_configured', `Configure ${provider === 'openai' ? 'OpenAI' : 'Anthropic Claude'} in Settings first.`)
+    const base = o.baseStrategyId === undefined ? undefined : (await strategies.get(v.str(o.baseStrategyId, 64))).definition
+    const raw = Array.isArray(o.messages) ? o.messages.slice(-20) : []
+    const messages: ChatMessage[] = raw.map((m) => {
+      const mo = v.obj(m)
+      return { role: v.oneOf(mo.role, ['user', 'assistant'] as const), content: v.str(mo.content, 20_000) }
+    })
+    const key = integrations.secret(provider, 'apiKey')!
+    const client = provider === 'openai' ? new OpenAiProvider(key) : new AnthropicProvider(key)
+    const settings = aiSettings(integrations.config(provider), provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL)
+    const symbols = await market.instruments().then((l) => l.map((i) => i.symbol)).catch(() => [])
+    const turn = await interpretTurn(messages, client, usage, settings, symbols, base)
+    audit(db, 'ai.strategy_turn', { provider, model: turn.model, status: turn.status, modify: Boolean(base), tokens: turn.usage.inputTokens + turn.usage.outputTokens })
+    return turn
+  })
+  const aiPreferences = (): AiPreferences => getSetting<AiPreferences>(db, 'ai.preferences', { preferredProvider: null })
+  /** The preferred provider if it is configured, otherwise the first configured one. */
+  const chooseAiProvider = (): 'openai' | 'anthropic' => {
+    const pref = aiPreferences().preferredProvider
+    if (pref && integrations.isConfigured(pref)) return pref
+    const any = (['anthropic', 'openai'] as const).find((p) => integrations.isConfigured(p))
+    if (!any) throw new UserError('not_configured', 'Add an OpenAI or Anthropic Claude API key in Settings → Connections first.')
+    return any
+  }
+  ipc.handle('ai:getPreferences', () => aiPreferences())
+  ipc.handle('ai:savePreferences', (req) => {
+    const o = v.obj(req)
+    const preferredProvider = o.preferredProvider === null ? null : v.oneOf(o.preferredProvider, ['openai', 'anthropic'] as const)
+    setSetting(db, 'ai.preferences', { preferredProvider })
+    audit(db, 'ai.preferences_saved', { preferredProvider })
+    return aiPreferences()
+  })
   ipc.handle('market:candles', (req) => {
     const o = v.obj(req)
     const tf = v.oneOf(o.timeframe, TIMEFRAMES)
@@ -385,7 +648,11 @@ async function bootstrap() {
     emit('subscription:changed', view)
   }, 60_000).unref()
 
-  app.on('before-quit', () => engine.stop())
+  app.on('before-quit', () => {
+    automation.stopScheduler()
+    engine.stop()
+    market.stop()
+  })
   return { updates, prefs }
 }
 
@@ -406,8 +673,10 @@ function createWindow(theme: string) {
       nodeIntegration: false,
       webSecurity: true,
       spellcheck: false,
-      // hidden test windows still need animation frames for UI automation
-      backgroundThrottling: !E2E_HIDDEN
+      // the welcome screen plays a short synthesized chime without a click first
+      autoplayPolicy: 'no-user-gesture-required',
+      // test runs render offscreen: frames, input and screenshots work with no visible window
+      offscreen: E2E_HIDDEN
     }
   })
   mainWindow.once('ready-to-show', () => !E2E_HIDDEN && mainWindow?.show())

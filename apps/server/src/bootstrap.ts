@@ -6,7 +6,7 @@ import { loadSigningKeys, type SigningKeys } from './security/keys.js'
 import { EvidenceStore } from './services/evidence.js'
 import { SmtpMailer, UnconfiguredMailer, type Mailer } from './services/mailer.js'
 import { Notifier } from './services/notifier.js'
-import { seedSettings } from './services/settings.js'
+import { applyConfiguredSettings } from './services/settings.js'
 
 export function createContext(
   config: ServerConfig,
@@ -15,7 +15,7 @@ export function createContext(
   const db = openDatabase(config.dbPath)
   migrate(db)
   const clock = overrides.clock ?? systemClock
-  seedSettings(db, clock.now(), config.initialAdminNotifyEmail)
+  applyConfiguredSettings(db, clock.now(), config)
   const mailer = overrides.mailer ?? (config.smtp ? new SmtpMailer(config.smtp) : new UnconfiguredMailer())
   return {
     config,

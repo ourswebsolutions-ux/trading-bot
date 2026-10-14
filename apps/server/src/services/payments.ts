@@ -18,6 +18,7 @@ import { newId } from '../security/tokens.js'
 import { currentPaidUntil } from './access.js'
 import { recordAudit } from './audit.js'
 import type { DeviceRow } from './devices.js'
+import { consumeReviewTokens, issueReviewLinks } from './reviewLinks.js'
 import { getSetting } from './settings.js'
 
 interface PlanRow {
@@ -168,7 +169,7 @@ export async function createPaymentRequest(
 
   const row = ctx.db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(id) as unknown as PaymentRequestRow
   const amount = formatMoney(plan!.price_cents, plan!.currency)
-  const link = `${ctx.config.publicBaseUrl}/admin/requests/${id}`
+  const links = issueReviewLinks(ctx, id)
   void ctx.notifier.email({
     kind: 'admin_new_request',
     to: getSetting(ctx.db, 'admin_notify_email'),
@@ -183,9 +184,13 @@ export async function createPaymentRequest(
       `Device ref:      ${device.reference_code}`,
       `Submitted:       ${iso}`,
       '',
-      `Review it here (administrator sign-in required): ${link}`,
+      'Verify that the funds arrived, then use one of these links:',
       '',
-      'Do not approve until you have confirmed the funds were received.'
+      `  Confirm Payment:  ${links.confirmUrl}`,
+      `  Cancel Request:   ${links.cancelUrl}`,
+      '',
+      `Each link opens a confirmation page showing the payment screenshot${ctx.config.reviewRequireAdminLogin ? ' and asks for your administrator sign-in' : ''} before anything changes.`,
+      `The links work once and expire on ${links.expiresAt.replace('T', ' ').slice(0, 16)} UTC. Do not forward this email.`
     ].join('\n'),
     requestId: id,
     deviceId: device.id
@@ -248,6 +253,7 @@ export function approveRequest(ctx: AppContext, admin: AdminActor, requestId: st
 
     ctx.db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decision, reason, created_at) VALUES (?, ?, ?, 'approved', NULL, ?)`)
       .run(newId(), req.id, admin.id, iso)
+    consumeReviewTokens(ctx, req.id)
 
     const plan = ctx.db.prepare('SELECT * FROM plans WHERE code = ?').get(req.plan_code) as unknown as PlanRow
     const paid = currentPaidUntil(ctx.db, req.device_id, now)
@@ -303,6 +309,7 @@ export function cancelRequest(ctx: AppContext, admin: AdminActor, requestId: str
     if (updated.changes !== 1) throw conflict('stale_request', 'This request was processed by someone else. Reload to see the outcome.')
     ctx.db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decision, reason, created_at) VALUES (?, ?, ?, 'cancelled', ?, ?)`)
       .run(newId(), req.id, admin.id, trimmed, iso)
+    consumeReviewTokens(ctx, req.id)
     recordAudit(ctx.db, now, {
       actorType: 'admin', actorId: admin.id, action: 'payment_request.cancelled', entityType: 'payment_request', entityId: req.id,
       details: { reason: trimmed }, ip: admin.ip
@@ -330,25 +337,6 @@ export function cancelRequest(ctx: AppContext, admin: AdminActor, requestId: str
 export interface AdminRequestListItem extends PaymentRequestRow {
   reference_code: string
   plan_name: string
-}
-
-export function listRequestsForAdmin(ctx: AppContext, status: PaymentRequestStatus | 'all', limit = 50, offset = 0): { items: AdminRequestListItem[]; total: number } {
-  const where = status === 'all' ? '' : 'WHERE r.status = ?'
-  const args = status === 'all' ? [] : [status]
-  const items = ctx.db.prepare(
-    `SELECT r.*, d.reference_code, p.name AS plan_name FROM payment_requests r
-     JOIN devices d ON d.id = r.device_id JOIN plans p ON p.code = r.plan_code
-     ${where} ORDER BY r.created_at ${status === 'pending' ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`
-  ).all(...args, limit, offset) as unknown as AdminRequestListItem[]
-  const total = (ctx.db.prepare(`SELECT COUNT(*) AS n FROM payment_requests r ${where}`).get(...args) as { n: number }).n
-  return { items, total }
-}
-
-export function countByStatus(ctx: AppContext): Record<PaymentRequestStatus, number> {
-  const rows = ctx.db.prepare('SELECT status, COUNT(*) AS n FROM payment_requests GROUP BY status').all() as { status: PaymentRequestStatus; n: number }[]
-  const out = { pending: 0, approved: 0, cancelled: 0 }
-  for (const r of rows) out[r.status] = r.n
-  return out
 }
 
 export interface EvidenceRow {
