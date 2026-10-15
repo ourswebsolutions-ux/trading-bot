@@ -2,18 +2,16 @@ import assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
 import { TRIAL_DURATION_MS, type PaymentRequestDto, type StatusResponse } from '@tradepilot/shared'
 import { approveRequest, cancelRequest } from '../src/services/payments.js'
-import { createAdminAccount, createHarness, emailedLinks, registerDevice, submitPayment, submitReview, T0, type Harness } from './helpers.js'
+import { BUSINESS_EMAIL, createHarness, emailedLinks, registerDevice, submitPayment, submitReview, T0, type Harness } from './helpers.js'
 
 const statusOf = async (h: Harness, token: string) =>
   (await h.app.inject({ method: 'GET', url: '/v1/status', headers: { authorization: `Bearer ${token}` } })).json() as StatusResponse
 
 describe('subscription approval through emailed links', () => {
   let h: Harness
-  let adminId: string
 
   before(async () => {
     h = await createHarness()
-    adminId = await createAdminAccount(h)
   })
   after(async () => h.close())
   afterEach(() => h.clock.set(T0))
@@ -23,15 +21,19 @@ describe('subscription approval through emailed links', () => {
     const res = await submitPayment(h, d.deviceToken, { planCode, contactEmail })
     assert.equal(res.statusCode, 201, res.body)
     const request = (res.json() as { request: PaymentRequestDto }).request
-    return { device: d, request, links: await emailedLinks(h, request.id) }
+    return { device: d, request, created: res.json(), links: await emailedLinks(h, request.id) }
   }
 
-  it('emails the business address with payment details and two single-use links, never credentials', async () => {
-    const { request } = await submit()
-    const mail = h.mailer.sent.find((m) => m.text.includes(request.id))!
-    assert.equal(mail.to, 'payments@example.test')
-    for (const s of [request.id, '$20.00', request.transactionId, 'Confirm Payment:', 'Cancel Request:', 'https://admin.example.test/review/']) assert.ok(mail.text.includes(s), s)
-    assert.ok(!/password/i.test(mail.text.replace('administrator sign-in', '')), 'no credentials in the email')
+  it('returns two single-use review links to the app (which emails them); the server itself sends nothing', async () => {
+    const before = h.mailer.sent.length
+    const { request, created, device } = await submit()
+    assert.equal(created.businessEmail, BUSINESS_EMAIL)
+    assert.equal(created.referenceCode, device.referenceCode)
+    assert.match(created.review.confirmUrl, /^https:\/\/admin\.example\.test\/review\/[A-Za-z0-9_-]{43}$/)
+    assert.match(created.review.cancelUrl, /^https:\/\/admin\.example\.test\/review\/[A-Za-z0-9_-]{43}$/)
+    assert.equal(Date.parse(created.review.expiresAt) - T0.getTime(), 72 * 3600_000)
+    await h.ctx.notifier.idle()
+    assert.equal(h.mailer.sent.length, before, 'no server-side email: no admin SMTP needed')
     const tokens = h.ctx.db.prepare('SELECT action, token_hash FROM review_tokens WHERE request_id = ?').all(request.id) as { action: string; token_hash: string }[]
     assert.deepEqual(tokens.map((t) => t.action).sort(), ['cancel', 'confirm'])
     const { confirm } = await emailedLinks(h, request.id)
@@ -48,11 +50,19 @@ describe('subscription approval through emailed links', () => {
     assert.equal(h.ctx.db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(request.id)!.status, 'pending')
   })
 
-  it('Confirm Payment requires administrator sign-in, activates exactly once and notifies the client', async () => {
+  it('Confirm Payment needs the review passphrase (no account), activates exactly once and notifies the client', async () => {
+    assert.equal((h.ctx.db.prepare('SELECT COUNT(*) AS n FROM admins').get() as { n: number }).n, 0, 'no administrator accounts exist')
     const { device, request, links } = await submit()
-    const wrong = await submitReview(h, links.confirm, { verified: 'yes' }, { password: 'not the password!' })
-    assert.equal(wrong.res.statusCode, 401)
+    const page = await h.app.inject({ method: 'GET', url: links.confirm })
+    assert.ok(page.body.includes('Review passphrase') && !/Administrator email/.test(page.body))
+    // the client also holds the links (their app emailed them) but cannot approve without the passphrase
+    const self = await submitReview(h, links.confirm, { verified: 'yes' }, { passphrase: 'i-sent-this-email-myself' })
+    assert.equal(self.res.statusCode, 401)
+    assert.match(self.res.body, /Incorrect review passphrase\. Nothing was changed/)
+    const noPass = await submitReview(h, links.confirm, { verified: 'yes' }, { passphrase: '' })
+    assert.equal(noPass.res.statusCode, 401)
     assert.equal((await statusOf(h, device.deviceToken)).subscription, null)
+    assert.equal(h.ctx.db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(request.id)!.status, 'pending')
 
     const ok = await submitReview(h, links.confirm, { verified: 'yes' })
     assert.equal(ok.res.statusCode, 200)
@@ -61,6 +71,8 @@ describe('subscription approval through emailed links', () => {
     assert.equal(status.subscription?.planCode, 'monthly')
     assert.equal(status.subscription?.expiresAt, '2026-02-10T12:00:00.000Z')
     assert.equal(status.access.reason, 'subscription')
+    const decision = h.ctx.db.prepare('SELECT decided_by, admin_id FROM admin_decisions WHERE request_id = ?').get(request.id) as { decided_by: string; admin_id: string | null }
+    assert.deepEqual({ ...decision }, { decided_by: `email:${BUSINESS_EMAIL}`, admin_id: null })
 
     // second click on either link: link already used, nothing activated twice
     const again = await h.app.inject({ method: 'GET', url: links.confirm })
@@ -81,7 +93,7 @@ describe('subscription approval through emailed links', () => {
     const page = await h.app.inject({ method: 'GET', url: links.confirm, remoteAddress: '10.9.9.9' })
     const cookie = page.cookies.find((c) => c.name.endsWith('tp_review'))!
     const csrf = /name="_csrf" value="([^"]+)"/.exec(page.body)![1]!
-    const post = () => h.app.inject({ method: 'POST', url: links.confirm, remoteAddress: '10.9.9.9', headers: { cookie: `${cookie.name}=${cookie.value}` }, payload: { _csrf: csrf, verified: 'yes', email: 'owner@example.test', password: 'correct horse battery staple' } })
+    const post = () => h.app.inject({ method: 'POST', url: links.confirm, remoteAddress: '10.9.9.9', headers: { cookie: `${cookie.name}=${cookie.value}` }, payload: { _csrf: csrf, verified: 'yes', passphrase: 'correct horse battery staple' } })
     const [a, b] = await Promise.all([post(), post()])
     assert.deepEqual([a.statusCode, b.statusCode].sort(), [200, 410])
     assert.equal(h.ctx.db.prepare('SELECT COUNT(*) AS n FROM subscriptions WHERE request_id = ?').get(request.id)!.n, 1)
@@ -101,6 +113,11 @@ describe('subscription approval through emailed links', () => {
     const res = await submitReview(h, links.cancel, { reason: 'No matching payment received' })
     assert.equal(res.res.statusCode, 200)
     assert.match(res.res.body, /Request cancelled/)
+    await h.ctx.notifier.idle()
+    assert.ok(h.mailer.sent.some((m) => m.to === 'user@example.test' && /cancelled/.test(m.subject) && m.text.includes('No matching payment received')), 'client emailed')
+    const inApp = await h.app.inject({ method: 'GET', url: '/v1/notifications', headers: { authorization: `Bearer ${device.deviceToken}` } })
+    assert.equal(inApp.json().notifications[0].kind, 'payment_cancelled')
+    assert.match(inApp.json().notifications[0].body, /No matching payment received/)
     const list = (await h.app.inject({ method: 'GET', url: '/v1/payment-requests', headers: { authorization: `Bearer ${device.deviceToken}` } })).json()
     assert.equal(list.requests[0].status, 'cancelled')
     assert.equal(list.requests[0].cancellationReason, 'No matching payment received')
@@ -141,7 +158,7 @@ describe('subscription approval through emailed links', () => {
 
   it('service-level decisions stay idempotent and conflict-free', async () => {
     const { request } = await submit()
-    const actor = { id: adminId, email: 'owner@example.test', ip: null }
+    const actor = { label: 'test', ip: null }
     const r1 = approveRequest(h.ctx, actor, request.id)
     const r2 = approveRequest(h.ctx, actor, request.id)
     assert.equal(r1.alreadyProcessed, false)
@@ -175,5 +192,71 @@ describe('subscription approval through emailed links', () => {
     const status = await statusOf(h, device.deviceToken)
     assert.equal(status.subscription?.status, 'expired')
     assert.deepEqual(status.access, { allowed: false, reason: 'subscription_expired', until: null })
+  })
+})
+
+describe('migration to email-only decisions', () => {
+  it('keeps decisions recorded by earlier administrator accounts', async () => {
+    const { DatabaseSync } = await import('node:sqlite')
+    const { migrate } = await import('../src/db/sqlite.js')
+    const { MIGRATIONS } = await import('../src/db/migrations.js')
+    const db = new DatabaseSync(':memory:')
+    migrate(db, MIGRATIONS.filter((m) => m.version <= 2))
+    db.exec('PRAGMA foreign_keys = ON')
+    db.prepare(`INSERT INTO devices (id, fingerprint_hash, token_hash, reference_code, platform, app_version, created_at, last_seen_at, token_rotated_at) VALUES ('dev', 'f', 't', 'TP-1', 'linux', '1', 't', 't', 't')`).run()
+    for (const r of ['r1', 'r2']) {
+      db.prepare(`INSERT INTO payment_requests (id, device_id, plan_code, amount_cents, currency, transaction_id, status, created_at, decided_at) VALUES (?, 'dev', 'monthly', 2000, 'USD', ?, 'cancelled', 't', 't')`).run(r, `TXN-${r}-0000`)
+    }
+    db.prepare(`INSERT INTO admins (id, email, display_name, password_hash, role, created_at, updated_at) VALUES ('a1', 'old@example.test', 'Old', 'x', 'superadmin', 't', 't')`).run()
+    db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decision, reason, created_at) VALUES ('d1', 'r1', 'a1', 'cancelled', 'no funds', 't')`).run()
+    assert.deepEqual(migrate(db), [3])
+    const row = db.prepare('SELECT admin_id, decided_by, decision, reason FROM admin_decisions').get() as Record<string, unknown>
+    assert.deepEqual({ ...row }, { admin_id: 'a1', decided_by: 'admin:old@example.test', decision: 'cancelled', reason: 'no funds' })
+    db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decided_by, decision, reason, created_at) VALUES ('d2', 'r2', NULL, 'email:x@example.test', 'approved', NULL, 't')`).run()
+    db.close()
+  })
+})
+
+describe('review passphrase protection', () => {
+  it('locks all decisions for 15 minutes after repeated wrong passphrases', async () => {
+    const h = await createHarness()
+    try {
+      const d = await registerDevice(h)
+      const res = await submitPayment(h, d.deviceToken)
+      const { confirm } = await emailedLinks(h, res.json().request.id)
+      for (let i = 0; i < 10; i++) {
+        const r = await submitReview(h, confirm, { verified: 'yes' }, { passphrase: `wrong-guess-${i}-xxxx` })
+        assert.equal(r.res.statusCode, 401)
+      }
+      const locked = await submitReview(h, confirm, { verified: 'yes' })
+      assert.equal(locked.res.statusCode, 429, 'even the right passphrase while locked')
+      assert.match(locked.res.body, /locked for 15 minutes/)
+      h.clock.advance(15 * 60_000 + 1)
+      assert.equal((await submitReview(h, confirm, { verified: 'yes' })).res.statusCode, 200)
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('without a configured passphrase no request is accepted and no decision is possible', async () => {
+    const h = await createHarness({ passphrase: false })
+    try {
+      const d = await registerDevice(h)
+      const plans = (await h.app.inject({ method: 'GET', url: '/v1/plans', headers: { authorization: `Bearer ${d.deviceToken}` } })).json()
+      assert.equal(plans.payments.available, false)
+      assert.equal(plans.payments.problemCode, 'review_passphrase_missing')
+      assert.equal(plans.payments.setupCommand, 'npm run review:passphrase -w @tradepilot/server -- --write')
+      assert.match(plans.payments.problem, /review passphrase that ourswebsolutions@gmail\.com enters.*has not been created.*REVIEW_PASSPHRASE_HASH/)
+      const res = await submitPayment(h, d.deviceToken)
+      assert.equal(res.statusCode, 503)
+      assert.equal(res.json().error.code, 'payments_not_configured')
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('rejects a plain passphrase where its hash is expected', async () => {
+    const { loadConfig } = await import('../src/config.js')
+    assert.throws(() => loadConfig({ NODE_ENV: 'test', REVIEW_PASSPHRASE_HASH: 'my secret passphrase' }), /must be the scrypt hash/)
   })
 })

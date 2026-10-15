@@ -3,7 +3,7 @@
  * call these channels (the preload whitelists them) and never sees secrets: credential
  * values go in, but only masked hints come back out.
  */
-import type { PaymentRequestDto, PlanDto, StatusResponse } from '@tradepilot/shared'
+import type { PaymentAvailability, PaymentRequestDto, PlanDto, StatusResponse } from '@tradepilot/shared'
 import type { DefinitionChange, StrategyDefinition, StrategyExplanation, ValidationResult } from './strategyRules'
 
 export type Result<T> = { ok: true; data: T } | { ok: false; error: IpcError }
@@ -42,8 +42,12 @@ export interface SubscriptionView {
 }
 export interface PlansView {
   plans: PlanDto[]
+  /** Optional extra payment details from the server (account / wallet); the app shows its own instructions. */
   paymentInstructions: string | null
   referenceCode: string
+  payments: PaymentAvailability
+  /** The client's own email connection (Settings → SMTP Email), used to send the payment request. */
+  clientEmail: { configured: boolean; address: string | null; problem: string | null }
 }
 export interface ScreenshotSelection {
   id: string

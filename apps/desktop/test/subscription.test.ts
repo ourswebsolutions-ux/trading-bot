@@ -7,9 +7,9 @@ import { after, before, describe, it } from 'node:test'
 import type { AddressInfo } from 'node:net'
 import { signEntitlement } from '@tradepilot/shared/entitlement'
 import { evaluateEntitlement } from '../src/main/entitlement.js'
-import { SubscriptionService } from '../src/main/subscription.js'
-import { createAdminAccount, createHarness, PNG_1PX, type Harness } from '../../server/test/helpers.js'
-import { approveRequest } from '../../server/src/services/payments.js'
+import { SubscriptionService, type ClientEmail } from '../src/main/subscription.js'
+import { BUSINESS_EMAIL, createHarness, PNG_1PX, submitReview, type Harness } from '../../server/test/helpers.js'
+import type { SmtpMessage } from '@tradepilot/shared/smtp'
 import { memoryDb, secretStore } from './helpers.js'
 
 describe('offline entitlement evaluation', () => {
@@ -42,22 +42,31 @@ describe('offline entitlement evaluation', () => {
 describe('desktop ↔ server subscription flow (real HTTP)', () => {
   let h: Harness
   let baseUrl: string
-  let adminId: string
   const machine = createHash('sha256').update('test-machine').digest('hex')
 
   before(async () => {
     h = await createHarness()
-    adminId = await createAdminAccount(h)
     await h.app.listen({ port: 0, host: '127.0.0.1' })
     baseUrl = `http://127.0.0.1:${(h.app.server.address() as AddressInfo).port}`
   })
   after(async () => h.close())
 
+  /** Stands in for the client's SMTP connection (Settings → SMTP Email); records what would be sent. */
+  const outbox: SmtpMessage[] = []
+  let smtp: { configured: boolean; fail: string | null } = { configured: true, fail: null }
+  const clientEmail: ClientEmail = {
+    problem: () => (smtp.configured ? null : 'Set up your email connection first: open Settings → SMTP Email.'),
+    address: () => (smtp.configured ? 'client@example.test' : null),
+    send: async (m) => {
+      if (smtp.fail) throw new Error(smtp.fail)
+      outbox.push(m)
+    }
+  }
   const client = (db = memoryDb(), now = () => h.clock.now()) => {
     const { store } = secretStore(db)
     return new SubscriptionService({
       db, secrets: store, apiBaseUrl: baseUrl, configurationError: null, publicKey: h.ctx.keys.publicKeyBase64,
-      appVersion: '0.1.0', platform: 'linux', fingerprint: async () => machine, now
+      appVersion: '0.1.0', platform: 'linux', fingerprint: async () => machine, now, clientEmail
     })
   }
 
@@ -92,6 +101,8 @@ describe('desktop ↔ server subscription flow (real HTTP)', () => {
 
     const plans = await svc.plans()
     assert.deepEqual(plans.plans.map((p) => p.priceCents), [2000, 50000])
+    assert.deepEqual(plans.payments, { available: true, businessEmail: BUSINESS_EMAIL, problem: null, problemCode: null, setupCommand: null })
+    assert.deepEqual(plans.clientEmail, { configured: true, address: 'client@example.test', problem: null })
 
     const dir = mkdtempSync(path.join(tmpdir(), 'tp-shot-'))
     const file = path.join(dir, 'proof.png')
@@ -99,16 +110,67 @@ describe('desktop ↔ server subscription flow (real HTTP)', () => {
     const shot = await svc.loadScreenshot(file)
     assert.match(shot.previewDataUrl, /^data:image\/png;base64,/)
     await assert.rejects(svc.submit({ planCode: 'monthly', transactionId: 'x', screenshotId: shot.id }), /highlighted/)
-    const created = await svc.submit({ planCode: 'monthly', transactionId: 'UPI-778899', screenshotId: shot.id, contactEmail: 'me@example.test' })
+    const created = await svc.submit({ planCode: 'monthly', transactionId: 'UPI-778899', screenshotId: shot.id })
     assert.equal(created.status, 'pending')
     assert.equal((await svc.requests())[0]?.id, created.id)
     assert.equal((await svc.refresh()).access.allowed, false, 'a pending request grants nothing')
 
-    approveRequest(h.ctx, { id: adminId, email: 'owner@example.test', ip: null }, created.id)
+    // the client's own SMTP sent the request to the business address; the server sent nothing
+    const mail = outbox.find((m) => m.text.includes(created.id))!
+    assert.equal(mail.to, BUSINESS_EMAIL)
+    for (const s of ['Client email:     client@example.test', 'Plan:             Monthly', '$20.00', 'Transaction ID:   UPI-778899', 'Confirm Payment:', 'Cancel Request:', 'review passphrase']) assert.ok(mail.text.includes(s), s)
+    assert.equal(mail.attachments?.length, 1)
+    assert.ok(mail.attachments![0]!.content.equals(PNG_1PX), 'payment screenshot attached')
+    assert.equal(mail.attachments![0]!.contentType, 'image/png')
+    assert.ok(!h.mailer.sent.some((m) => m.to === BUSINESS_EMAIL), 'no server-side email')
+    // the recipient opens the emailed link: opening changes nothing; the decision needs the passphrase
+    const confirm = new URL(/Confirm Payment:\s+(\S+)/.exec(mail.text)![1]!).pathname
+    assert.equal((await submitReview(h, confirm, { verified: 'yes' }, { passphrase: 'client guess 12345' })).res.statusCode, 401)
+    assert.equal((await svc.refresh()).access.allowed, false, 'a wrong passphrase grants nothing')
+    assert.equal((await submitReview(h, confirm, { verified: 'yes' })).res.statusCode, 200)
     const restored = await svc.refresh()
     assert.equal(restored.access.allowed, true)
     assert.equal(restored.status?.subscription?.planCode, 'monthly')
     h.clock.set(new Date('2026-01-10T12:00:00.000Z'))
+  })
+
+  const pickShot = async (svc: SubscriptionService) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'tp-shot-'))
+    writeFileSync(path.join(dir, 'p.png'), PNG_1PX)
+    return svc.loadScreenshot(path.join(dir, 'p.png'))
+  }
+
+  it('asks the client to configure their email connection before submitting', async () => {
+    smtp = { configured: false, fail: null }
+    try {
+      const svc = client()
+      await svc.refresh()
+      const plans = await svc.plans()
+      assert.equal(plans.clientEmail.configured, false)
+      assert.match(plans.clientEmail.problem!, /Settings → SMTP Email/)
+      const shot = await pickShot(svc)
+      await assert.rejects(svc.submit({ planCode: 'monthly', transactionId: 'UPI-445566', screenshotId: shot.id, contactEmail: 'me@example.test' }), /Set up your email connection first/)
+      assert.equal(h.ctx.db.prepare(`SELECT COUNT(*) AS n FROM payment_requests WHERE transaction_id = 'UPI-445566'`).get()!.n, 0, 'nothing reached the server')
+    } finally {
+      smtp = { configured: true, fail: null }
+    }
+  })
+
+  it('withdraws the request when the client\'s email cannot be sent, so nothing is left pending', async () => {
+    const svc = client()
+    await svc.refresh()
+    const shot = await pickShot(svc)
+    smtp = { configured: true, fail: 'Invalid login: 535 5.7.8 Username and Password not accepted' }
+    try {
+      await assert.rejects(svc.submit({ planCode: 'lifetime', transactionId: 'UPI-990011', screenshotId: shot.id }), /could not be emailed to ourswebsolutions@gmail\.com: Invalid login.*Nothing was submitted/)
+    } finally {
+      smtp = { configured: true, fail: null }
+    }
+    assert.equal(h.ctx.db.prepare(`SELECT COUNT(*) AS n FROM payment_requests WHERE transaction_id = 'UPI-990011'`).get()!.n, 0)
+    assert.equal((await svc.refresh()).status?.pendingRequestId, null)
+    // fixed the email settings: the same screenshot and transaction can be submitted again
+    const again = await svc.submit({ planCode: 'lifetime', transactionId: 'UPI-990011', screenshotId: shot.id })
+    assert.equal(again.status, 'pending')
   })
 
   it('re-registers transparently when its device credential was revoked', async () => {

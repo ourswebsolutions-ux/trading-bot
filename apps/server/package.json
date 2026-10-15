@@ -9,12 +9,12 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import tsx --test --test-reporter=spec \"test/**/*.test.ts\"",
-    "admin:create": "tsx --env-file-if-exists=.env src/cli/create-admin.ts",
     "db:migrate": "tsx --env-file-if-exists=.env src/cli/migrate.ts",
     "db:backup": "tsx --env-file-if-exists=.env src/cli/backup.ts",
     "keys:generate": "tsx src/cli/generate-keys.ts",
     "review:resend": "tsx --env-file-if-exists=.env src/cli/review-resend.ts",
-    "smtp:test": "tsx --env-file-if-exists=.env src/cli/smtp-test.ts"
+    "smtp:test": "tsx --env-file-if-exists=.env src/cli/smtp-test.ts",
+    "review:passphrase": "tsx src/cli/review-passphrase.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",

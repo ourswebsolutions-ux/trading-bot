@@ -12,7 +12,8 @@ import { interpretTurn } from './ai/strategyInterpreter.js'
 import { ConsentStore } from './channels/whatsapp.js'
 import { DeltaAccountService } from './delta/account.js'
 import { IntegrationService } from './integrations.js'
-import { aiSettings, buildIntegrationSpecs, DEFAULT_OPENAI_MODEL, deltaRegion, marketSettings, migrateIntegrationConfig } from './integrationSpecs.js'
+import { aiSettings, buildIntegrationSpecs, DEFAULT_OPENAI_MODEL, deltaRegion, marketSettings, migrateIntegrationConfig, smtpSettings } from './integrationSpecs.js'
+import { sendSmtp } from '@tradepilot/shared/smtp'
 import { DEFAULT_ANTHROPIC_MODEL } from './ai/anthropic.js'
 import { redact, redactValue } from './redact.js'
 import { AutomationService } from './trading/automation.js'
@@ -143,6 +144,17 @@ async function bootstrap() {
     onRemoteNotification: (n) => {
       const severity = n.kind === 'payment_approved' ? 'success' : n.kind === 'payment_cancelled' ? 'warning' : 'info'
       notifications.add({ category: 'subscription', severity, title: n.title, body: n.body, remoteId: n.id, createdAt: n.createdAt })
+    },
+    // payment requests go out through the client's own SMTP connection (password in the OS keychain)
+    clientEmail: {
+      problem: () =>
+        integrations.isConfigured('smtp')
+          ? null
+          : 'Set up your email connection first: open Settings → SMTP Email, enter your mail server and sign-in, and send a test email. TradePilot sends your payment request to ourswebsolutions@gmail.com from your own email account.',
+      address: () => /<?([^<>\s]+@[^<>\s]+)>?\s*$/.exec(integrations.config('smtp').from ?? '')?.[1] ?? null,
+      send: async (m) => {
+        await sendSmtp(smtpSettings(integrations.config('smtp'), integrations.secret('smtp', 'password')), m)
+      }
     }
   })
 

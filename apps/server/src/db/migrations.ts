@@ -190,5 +190,29 @@ CREATE TABLE review_tokens (
 );
 CREATE INDEX ix_review_tokens_request ON review_tokens(request_id);
 `
+  },
+  {
+    version: 3,
+    name: 'email_only_decisions',
+    sql: `
+-- Decisions are made through the emailed single-use links; no administrator account is
+-- involved. decided_by records the channel (e.g. "email:ourswebsolutions@gmail.com").
+-- Earlier decisions keep their admin_id.
+CREATE TABLE admin_decisions_v3 (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE REFERENCES payment_requests(id),
+  admin_id TEXT REFERENCES admins(id),
+  decided_by TEXT NOT NULL CHECK (length(decided_by) BETWEEN 1 AND 200),
+  decision TEXT NOT NULL CHECK (decision IN ('approved', 'cancelled')),
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (decision = 'approved' OR (reason IS NOT NULL AND length(trim(reason)) > 0))
+);
+INSERT INTO admin_decisions_v3 (id, request_id, admin_id, decided_by, decision, reason, created_at)
+  SELECT d.id, d.request_id, d.admin_id, COALESCE((SELECT 'admin:' || a.email FROM admins a WHERE a.id = d.admin_id), 'admin'), d.decision, d.reason, d.created_at
+  FROM admin_decisions d;
+DROP TABLE admin_decisions;
+ALTER TABLE admin_decisions_v3 RENAME TO admin_decisions;
+`
   }
 ]

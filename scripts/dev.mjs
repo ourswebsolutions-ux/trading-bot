@@ -115,6 +115,6 @@ if (!(await waitForServer())) {
   shutdown(1)
 } else {
   say('dev', `server ready at http://127.0.0.1:${port} (admin UI: /admin). Starting the desktop app…`)
-  if (!serverEnv.includes('ADMIN_')) say('dev', 'tip: create an admin with  npm run admin:create -w @tradepilot/server -- --email you@example.com --name "You"')
+  if (!/^REVIEW_PASSPHRASE_HASH(_FILE)?=\S/m.test(serverEnv)) say('dev', 'payments are off until you create the review passphrase:  npm run review:passphrase -w @tradepilot/server -- --write  (then restart npm run dev)')
   run('desktop', ['run', 'dev', '-w', '@tradepilot/desktop'], portOverride)
 }

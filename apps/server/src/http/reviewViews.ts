@@ -18,15 +18,11 @@ export function messagePage(title: string, text: string, tone: 'ok' | 'bad' | 'w
 
 export function reviewPage(
   d: Detail,
-  opts: { action: 'confirm' | 'cancel'; csrf: string; token: string; requireLogin: boolean; expiresAt: string; error?: string | null; reason?: string; email?: string }
+  opts: { action: 'confirm' | 'cancel'; csrf: string; token: string; expiresAt: string; error?: string | null; reason?: string; passphraseConfigured: boolean }
 ): string {
   const r = d.request
   const amount = formatMoney(r.amount_cents, r.currency)
   const confirm = opts.action === 'confirm'
-  const login = opts.requireLogin
-    ? html`<label>Administrator email<input type="email" name="email" autocomplete="username" required value="${opts.email ?? ''}"></label>
-           <label>Password<input type="password" name="password" autocomplete="current-password" required></label>`
-    : ''
   return page(confirm ? 'Confirm payment' : 'Cancel payment request', html`
 <div class="review-head"><h1>${confirm ? 'Confirm payment' : 'Cancel payment request'} · ${r.plan_name} ${amount}</h1><span class="badge pending">pending</span></div>
 <p class="sub mono">${r.id}</p>
@@ -62,7 +58,10 @@ ${d.duplicateEvidence.length > 0 ? html`<div class="notice warn">The same screen
           ? html`<label class="check"><input type="checkbox" name="verified" value="yes" required>
               <span>I confirmed that <b>${amount}</b> with transaction ID <b class="mono">${r.transaction_id}</b> arrived in our account.</span></label>`
           : html`<label>Reason (sent to the client)<textarea name="reason" required minlength="3" maxlength="500" placeholder="e.g. No payment with this transaction ID was received.">${opts.reason ?? ''}</textarea></label>`}
-        ${login}
+        ${opts.passphraseConfigured
+          ? html`<label>Review passphrase<input type="password" name="passphrase" autocomplete="current-password" required maxlength="1024"></label>
+                 <p class="lock-note">Only the business knows the passphrase; it stops a client who sent this email from deciding their own request.</p>`
+          : html`<div class="notice bad">Payment confirmation is not set up on this server (REVIEW_PASSPHRASE_HASH). No decision can be recorded until it is.</div>`}
         <div><button class="${confirm ? 'ok' : 'danger'}" type="submit">${confirm ? 'Confirm Payment' : 'Cancel Request'}</button></div>
         <p class="lock-note">${confirm ? `Activates the ${r.plan_name} plan once. ` : 'No access is granted. '}This link stops working after it is used.</p>
       </form>

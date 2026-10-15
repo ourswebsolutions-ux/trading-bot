@@ -5,7 +5,7 @@ import type { AppContext } from '../context.js'
 import { AppError, badRequest } from '../errors.js'
 import { buildStatus, computeAccess, issueEntitlementToken } from '../services/access.js'
 import { authenticateDevice, registerDevice, type DeviceRow } from '../services/devices.js'
-import { createPaymentRequest, listDeviceRequests, listPlans, type UploadedScreenshot } from '../services/payments.js'
+import { createPaymentRequest, listDeviceRequests, listPlans, paymentAvailability, withdrawPaymentRequest, type UploadedScreenshot } from '../services/payments.js'
 import { getSetting } from '../services/settings.js'
 import { sha256Hex } from '../security/tokens.js'
 
@@ -49,7 +49,8 @@ export async function registerApiRoutes(app: FastifyInstance, ctx: AppContext): 
   app.get('/v1/plans', { preHandler: requireDevice }, async (request): Promise<PlansResponse> => ({
     plans: listPlans(ctx),
     paymentInstructions: getSetting(ctx.db, 'payment_instructions'),
-    referenceCode: request.device!.reference_code
+    referenceCode: request.device!.reference_code,
+    payments: paymentAvailability(ctx)
   }))
 
   app.get('/v1/payment-requests', { preHandler: requireDevice }, async (request) => ({ requests: listDeviceRequests(ctx, request.device!.id) }))
@@ -84,9 +85,17 @@ export async function registerApiRoutes(app: FastifyInstance, ctx: AppContext): 
         screenshot,
         request.ip
       )
-      return reply.status(201).send({ request: created })
+      return reply.status(201).send(created)
     }
   )
+
+  /** The app withdraws its own undecided request when it could not email it to the business address. */
+  app.delete('/v1/payment-requests/:id', { preHandler: requireDevice, config: { rateLimit: { max: 20, timeWindow: '1 hour' } } }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const body = (request.body ?? {}) as { reason?: unknown }
+    await withdrawPaymentRequest(ctx, request.device!, String(id).slice(0, 64), typeof body.reason === 'string' ? body.reason : 'withdrawn by the app', request.ip)
+    return reply.status(204).send()
+  })
 
   /** In-app notifications for this device (approval / cancellation outcomes). */
   app.get('/v1/notifications', { preHandler: requireDevice }, async (request) => {

@@ -17,10 +17,17 @@ export interface SmtpSettings {
   timeoutMs?: number
 }
 
+export interface SmtpAttachment {
+  filename: string
+  content: Buffer
+  contentType: string
+}
+
 export interface SmtpMessage {
   to: string
   subject: string
   text: string
+  attachments?: SmtpAttachment[]
 }
 
 /** What the SMTP server actually answered. "Accepted" means queued by the server, not delivered to the inbox. */
@@ -93,7 +100,7 @@ export async function verifySmtp(s: SmtpSettings): Promise<void> {
 export async function sendSmtp(s: SmtpSettings, m: SmtpMessage, transport?: Transporter): Promise<SmtpDeliveryResult> {
   const t = transport ?? createSmtpTransport(s)
   try {
-    const info = await t.sendMail({ from: s.from, to: m.to, subject: m.subject, text: m.text })
+    const info = await t.sendMail({ from: s.from, to: m.to, subject: m.subject, text: m.text, ...(m.attachments?.length ? { attachments: m.attachments } : {}) })
     const result: SmtpDeliveryResult = {
       messageId: info.messageId,
       accepted: (info.accepted ?? []).map(String),

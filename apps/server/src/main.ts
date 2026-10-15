@@ -8,8 +8,9 @@ const ctx = createContext(config)
 const app = await buildApp(ctx, { logger: true })
 
 app.log.info({ publicBaseUrl: config.publicBaseUrl, smtp: ctx.notifier.mailer.description }, 'TradePilot server starting')
-if (!config.adminNotifyEmail) app.log.warn('ADMIN_NOTIFY_EMAIL is not set: payment requests cannot be emailed for approval')
-if (!config.paymentInstructions) app.log.warn('PAYMENT_INSTRUCTIONS(_FILE) is not set: clients cannot submit payments yet')
+app.log.info({ businessEmail: config.adminNotifyEmail }, 'payment requests are emailed to the business address for confirmation')
+if (!config.reviewPassphraseHash) app.log.warn('REVIEW_PASSPHRASE_HASH is not set: payment requests are refused until you run  npm run review:passphrase -w @tradepilot/server -- --write  and restart')
+if (!ctx.notifier.mailer.configured) app.log.info('server SMTP not configured (optional): clients are notified in the app; payment requests are emailed by the client app itself')
 app.log.info(`Entitlement public key (pin in the desktop build as MAIN_VITE_ENTITLEMENT_PUBLIC_KEY): ${ctx.keys.publicKeyBase64}`)
 
 const timers: NodeJS.Timeout[] = []

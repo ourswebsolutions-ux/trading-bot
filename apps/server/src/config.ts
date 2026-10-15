@@ -5,6 +5,13 @@ import { z } from 'zod'
 /** TradePilot's subscription contact address (not a secret). Override with ADMIN_NOTIFY_EMAIL. */
 export const DEFAULT_ADMIN_NOTIFY_EMAIL = 'ourswebsolutions@gmail.com'
 
+function readPassphraseHash(raw: string | undefined): string | null {
+  const v = raw?.trim()
+  if (!v) return null
+  if (!/^scrypt\$\d+\$\d+\$\d+\$[^$]+\$[^$]+$/.test(v)) throw new Error('REVIEW_PASSPHRASE_HASH must be the scrypt hash printed by "npm run review:passphrase", not the passphrase itself')
+  return v
+}
+
 const bool = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1')
 
 const EnvSchema = z.object({
@@ -24,8 +31,9 @@ const EnvSchema = z.object({
   PAYMENT_INSTRUCTIONS_FILE: z.string().optional(),
   /** Lifetime of the Confirm Payment / Cancel Request email links. */
   REVIEW_LINK_TTL_HOURS: z.coerce.number().min(1).max(720).default(72),
-  /** Require administrator email + password on the review page before acting (recommended). */
-  REVIEW_REQUIRE_ADMIN_LOGIN: bool.default(true),
+  /** scrypt hash of the business's review passphrase (npm run review:passphrase); or a file containing it. */
+  REVIEW_PASSPHRASE_HASH: z.string().optional(),
+  REVIEW_PASSPHRASE_HASH_FILE: z.string().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
   /** true = implicit TLS (port 465). false = STARTTLS upgrade, which SMTP_REQUIRE_TLS enforces. */
@@ -63,9 +71,10 @@ export interface ServerConfig {
   entitlementPrivateKeyFile?: string
   entitlementTtlMs: number
   adminNotifyEmail?: string
+  /** scrypt hash of the review passphrase; null when not configured (decisions are then impossible). */
+  reviewPassphraseHash: string | null
   paymentInstructions?: string
   reviewLinkTtlMs: number
-  reviewRequireAdminLogin: boolean
   smtp: SmtpConfig | null
   backupIntervalHours: number
   backupRetention: number
@@ -115,9 +124,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     entitlementPrivateKeyFile: e.ENTITLEMENT_PRIVATE_KEY_FILE,
     entitlementTtlMs: e.ENTITLEMENT_TOKEN_TTL_HOURS * 3600_000,
     adminNotifyEmail: e.ADMIN_NOTIFY_EMAIL,
+    reviewPassphraseHash: readPassphraseHash(e.REVIEW_PASSPHRASE_HASH_FILE ? readFileSync(e.REVIEW_PASSPHRASE_HASH_FILE, 'utf8') : e.REVIEW_PASSPHRASE_HASH),
     paymentInstructions: e.PAYMENT_INSTRUCTIONS_FILE ? readFileSync(e.PAYMENT_INSTRUCTIONS_FILE, 'utf8').trim() : e.PAYMENT_INSTRUCTIONS?.replace(/\\n/g, '\n'),
     reviewLinkTtlMs: e.REVIEW_LINK_TTL_HOURS * 3600_000,
-    reviewRequireAdminLogin: e.REVIEW_REQUIRE_ADMIN_LOGIN,
     smtp,
     backupIntervalHours: e.BACKUP_INTERVAL_HOURS,
     backupRetention: e.BACKUP_RETENTION

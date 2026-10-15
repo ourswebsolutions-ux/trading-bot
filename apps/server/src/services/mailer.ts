@@ -1,4 +1,4 @@
-import { createSmtpTransport, sendSmtp, type SmtpSettings } from '@tradepilot/shared/smtp'
+import { createSmtpTransport, sendSmtp, type SmtpAttachment, type SmtpSettings } from '@tradepilot/shared/smtp'
 import type { Transporter } from 'nodemailer'
 import type { SmtpConfig } from '../config.js'
 
@@ -6,6 +6,7 @@ export interface MailMessage {
   to: string
   subject: string
   text: string
+  attachments?: SmtpAttachment[]
 }
 
 export interface Mailer {
@@ -40,7 +41,7 @@ export class SmtpMailer implements Mailer {
 
 export class UnconfiguredMailer implements Mailer {
   readonly configured = false
-  readonly description = 'SMTP is not configured (set SMTP_HOST, SMTP_FROM and credentials)'
+  readonly description = 'SMTP is not configured (set SMTP_HOST, SMTP_FROM, SMTP_USER and SMTP_PASSWORD_FILE)'
   async send(): Promise<{ messageId: string }> {
     throw new Error('SMTP is not configured')
   }
@@ -48,10 +49,10 @@ export class UnconfiguredMailer implements Mailer {
 
 /** Test double that records messages and can be told to fail. */
 export class MemoryMailer implements Mailer {
-  readonly configured = true
   readonly description = 'in-memory test mailer'
   readonly sent: MailMessage[] = []
   failNext = false
+  constructor(readonly configured = true) {}
   async send(message: MailMessage): Promise<{ messageId: string }> {
     if (this.failNext) {
       this.failNext = false

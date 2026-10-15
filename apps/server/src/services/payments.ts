@@ -6,6 +6,8 @@ import {
   isValidTransactionId,
   normalizeTransactionId,
   sniffImageMime,
+  type CreatedPaymentRequest,
+  type PaymentAvailability,
   type PaymentRequestDto,
   type PaymentRequestStatus,
   type PlanCode,
@@ -55,6 +57,29 @@ function getPlan(ctx: AppContext, code: string): PlanRow | undefined {
   return ctx.db.prepare('SELECT * FROM plans WHERE code = ? AND active = 1').get(code) as PlanRow | undefined
 }
 
+/**
+ * The client's app emails each request to the business address with the review links; the
+ * business decides with its review passphrase. Requests are accepted only when a decision is
+ * possible, i.e. the passphrase hash is configured. Returns the exact problem otherwise.
+ */
+export function paymentAvailability(ctx: AppContext): PaymentAvailability {
+  const businessEmail = getSetting(ctx.db, 'admin_notify_email') ?? ''
+  if (!businessEmail) {
+    return {
+      available: false, businessEmail, problemCode: 'business_email_missing', setupCommand: null,
+      problem: 'The subscription server has no business email address (ADMIN_NOTIFY_EMAIL). Set it in the server environment and restart the server.'
+    }
+  }
+  if (!ctx.config.reviewPassphraseHash) {
+    return {
+      available: false, businessEmail, problemCode: 'review_passphrase_missing',
+      setupCommand: 'npm run review:passphrase -w @tradepilot/server -- --write',
+      problem: `The review passphrase that ${businessEmail} enters to confirm or cancel payment requests has not been created on the subscription server yet (REVIEW_PASSPHRASE_HASH). Without it nobody could approve a payment, so requests are not accepted.`
+    }
+  }
+  return { available: true, businessEmail, problem: null, problemCode: null, setupCommand: null }
+}
+
 export function formatMoney(cents: number, currency: string): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(cents / 100)
 }
@@ -97,7 +122,8 @@ export interface UploadedScreenshot {
 /**
  * Validates and stores a manual payment submission. The amount always comes from the
  * plans table (never from the client) and the request starts as "pending": no access
- * is granted until an administrator confirms the payment.
+ * is granted until the business confirms the payment through an emailed link with its review
+ * passphrase. The app emails the returned links to the business through the client's SMTP.
  */
 export async function createPaymentRequest(
   ctx: AppContext,
@@ -105,7 +131,7 @@ export async function createPaymentRequest(
   input: CreatePaymentInput,
   screenshot: UploadedScreenshot | null,
   ip: string | null
-): Promise<PaymentRequestDto> {
+): Promise<CreatedPaymentRequest> {
   const fields: Record<string, string> = {}
   const plan = (PLAN_CODES as readonly string[]).includes(input.planCode) ? getPlan(ctx, input.planCode) : undefined
   if (!plan) fields.planCode = 'Select a valid plan'
@@ -114,7 +140,7 @@ export async function createPaymentRequest(
   if (!isValidTransactionId(transactionId)) fields.transactionId = 'Transaction ID must be 6–64 letters, digits or - _ . / #'
 
   const contactEmail = input.contactEmail?.trim() || null
-  if (contactEmail && !isValidEmail(contactEmail)) fields.contactEmail = 'Enter a valid email address or leave it blank'
+  if (!contactEmail || !isValidEmail(contactEmail)) fields.contactEmail = 'Enter your email address'
 
   const note = input.note?.trim() || null
   if (note && note.length > 500) fields.note = 'Note must be 500 characters or fewer'
@@ -128,9 +154,8 @@ export async function createPaymentRequest(
   }
 
   if (Object.keys(fields).length > 0) throw badRequest('Please correct the highlighted fields', fields)
-  if (!getSetting(ctx.db, 'payment_instructions')) {
-    throw new AppError(503, 'payments_not_configured', 'Payment instructions have not been configured yet. Please try again later.')
-  }
+  const availability = paymentAvailability(ctx)
+  if (!availability.available) throw new AppError(503, 'payments_not_configured', availability.problem!)
 
   const now = ctx.clock.now()
   const paid = currentPaidUntil(ctx.db, device.id, now)
@@ -168,34 +193,31 @@ export async function createPaymentRequest(
   }
 
   const row = ctx.db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(id) as unknown as PaymentRequestRow
-  const amount = formatMoney(plan!.price_cents, plan!.currency)
   const links = issueReviewLinks(ctx, id)
-  void ctx.notifier.email({
-    kind: 'admin_new_request',
-    to: getSetting(ctx.db, 'admin_notify_email'),
-    subject: `[TradePilot] New ${plan!.name} payment request — ${amount} — ${device.reference_code}`,
-    body: [
-      'A new payment request is waiting for review.',
-      '',
-      `Request ID:      ${id}`,
-      `Plan:            ${plan!.name}`,
-      `Amount:          ${amount}`,
-      `Transaction ID:  ${transactionId}`,
-      `Device ref:      ${device.reference_code}`,
-      `Submitted:       ${iso}`,
-      '',
-      'Verify that the funds arrived, then use one of these links:',
-      '',
-      `  Confirm Payment:  ${links.confirmUrl}`,
-      `  Cancel Request:   ${links.cancelUrl}`,
-      '',
-      `Each link opens a confirmation page showing the payment screenshot${ctx.config.reviewRequireAdminLogin ? ' and asks for your administrator sign-in' : ''} before anything changes.`,
-      `The links work once and expire on ${links.expiresAt.replace('T', ' ').slice(0, 16)} UTC. Do not forward this email.`
-    ].join('\n'),
-    requestId: id,
-    deviceId: device.id
+  return { request: toDto(ctx, row), review: links, businessEmail: availability.businessEmail, referenceCode: device.reference_code }
+}
+
+/**
+ * Withdraws the device's own undecided request, e.g. because the app could not email it to the
+ * business address. Nothing is kept pending that nobody was told about.
+ */
+export async function withdrawPaymentRequest(ctx: AppContext, device: DeviceRow, requestId: string, reason: string, ip: string | null): Promise<void> {
+  const req = ctx.db.prepare('SELECT * FROM payment_requests WHERE id = ? AND device_id = ?').get(requestId, device.id) as PaymentRequestRow | undefined
+  if (!req) throw notFound('Payment request not found')
+  if (req.status !== 'pending') throw conflict('already_decided', `This request was already ${req.status} and cannot be withdrawn.`)
+  const evidence = ctx.db.prepare('SELECT storage_key FROM payment_evidence WHERE request_id = ?').get(req.id) as { storage_key: string } | undefined
+  transaction(ctx.db, () => {
+    ctx.db.prepare('DELETE FROM review_tokens WHERE request_id = ?').run(req.id)
+    ctx.db.prepare('UPDATE notifications SET request_id = NULL WHERE request_id = ?').run(req.id)
+    ctx.db.prepare('DELETE FROM payment_evidence WHERE request_id = ?').run(req.id)
+    const deleted = ctx.db.prepare(`DELETE FROM payment_requests WHERE id = ? AND status = 'pending'`).run(req.id)
+    if (deleted.changes !== 1) throw conflict('already_decided', 'This request was decided meanwhile and cannot be withdrawn.')
+    recordAudit(ctx.db, ctx.clock.now(), {
+      actorType: 'device', actorId: device.id, action: 'payment_request.withdrawn', entityType: 'payment_request', entityId: req.id,
+      details: { reason: reason.slice(0, 300), transactionId: req.transaction_id }, ip
+    })
   })
-  return toDto(ctx, row)
+  if (evidence) await ctx.evidence.remove(evidence.storage_key)
 }
 
 export function addMonthsUtc(date: Date, months: number): Date {
@@ -208,9 +230,10 @@ export function addMonthsUtc(date: Date, months: number): Date {
   return d
 }
 
-export interface AdminActor {
-  id: string
-  email: string
+/** Who decided: the emailed review link (or a server-side tool), never an in-app administrator. */
+export interface DecisionActor {
+  /** e.g. "email:ourswebsolutions@gmail.com" */
+  label: string
   ip: string | null
 }
 
@@ -232,7 +255,7 @@ function loadRequest(ctx: AppContext, id: string): PaymentRequestRow {
  * a replayed approval returns the existing activation; approving a cancelled
  * request, or a request that changed since the admin loaded it, is rejected.
  */
-export function approveRequest(ctx: AppContext, admin: AdminActor, requestId: string, expectedVersion?: number): DecisionResult {
+export function approveRequest(ctx: AppContext, actor: DecisionActor, requestId: string, expectedVersion?: number): DecisionResult {
   const result = transaction(ctx.db, () => {
     const req = loadRequest(ctx, requestId)
     if (req.status === 'approved') {
@@ -251,8 +274,8 @@ export function approveRequest(ctx: AppContext, admin: AdminActor, requestId: st
     ).run(iso, req.id, req.version)
     if (updated.changes !== 1) throw conflict('stale_request', 'This request was processed by someone else. Reload to see the outcome.')
 
-    ctx.db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decision, reason, created_at) VALUES (?, ?, ?, 'approved', NULL, ?)`)
-      .run(newId(), req.id, admin.id, iso)
+    ctx.db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decided_by, decision, reason, created_at) VALUES (?, ?, NULL, ?, 'approved', NULL, ?)`)
+      .run(newId(), req.id, actor.label, iso)
     consumeReviewTokens(ctx, req.id)
 
     const plan = ctx.db.prepare('SELECT * FROM plans WHERE code = ?').get(req.plan_code) as unknown as PlanRow
@@ -264,10 +287,10 @@ export function approveRequest(ctx: AppContext, admin: AdminActor, requestId: st
       `INSERT INTO subscriptions (id, device_id, plan_code, request_id, starts_at, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(subscriptionId, req.device_id, req.plan_code, req.id, startsAt.toISOString(), expiresAt, iso)
 
-    recordAudit(ctx.db, now, { actorType: 'admin', actorId: admin.id, action: 'payment_request.approved', entityType: 'payment_request', entityId: req.id, ip: admin.ip })
+    recordAudit(ctx.db, now, { actorType: 'admin', actorId: actor.label, action: 'payment_request.approved', entityType: 'payment_request', entityId: req.id, ip: actor.ip })
     recordAudit(ctx.db, now, {
-      actorType: 'admin', actorId: admin.id, action: 'subscription.activated', entityType: 'device', entityId: req.device_id,
-      details: { subscriptionId, requestId: req.id, planCode: req.plan_code, startsAt: startsAt.toISOString(), expiresAt }, ip: admin.ip
+      actorType: 'admin', actorId: actor.label, action: 'subscription.activated', entityType: 'device', entityId: req.device_id,
+      details: { subscriptionId, requestId: req.id, planCode: req.plan_code, startsAt: startsAt.toISOString(), expiresAt }, ip: actor.ip
     })
 
     const body = expiresAt
@@ -290,7 +313,7 @@ export function approveRequest(ctx: AppContext, admin: AdminActor, requestId: st
   return { request: result.request, alreadyProcessed: result.alreadyProcessed, subscriptionId: result.subscriptionId }
 }
 
-export function cancelRequest(ctx: AppContext, admin: AdminActor, requestId: string, reason: string, expectedVersion?: number): DecisionResult {
+export function cancelRequest(ctx: AppContext, actor: DecisionActor, requestId: string, reason: string, expectedVersion?: number): DecisionResult {
   const trimmed = reason.trim()
   if (trimmed.length < 3 || trimmed.length > 500) throw badRequest('Enter a cancellation reason (3–500 characters)', { reason: 'Required' })
 
@@ -307,12 +330,12 @@ export function cancelRequest(ctx: AppContext, admin: AdminActor, requestId: str
       `UPDATE payment_requests SET status = 'cancelled', decided_at = ?, version = version + 1 WHERE id = ? AND status = 'pending' AND version = ?`
     ).run(iso, req.id, req.version)
     if (updated.changes !== 1) throw conflict('stale_request', 'This request was processed by someone else. Reload to see the outcome.')
-    ctx.db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decision, reason, created_at) VALUES (?, ?, ?, 'cancelled', ?, ?)`)
-      .run(newId(), req.id, admin.id, trimmed, iso)
+    ctx.db.prepare(`INSERT INTO admin_decisions (id, request_id, admin_id, decided_by, decision, reason, created_at) VALUES (?, ?, NULL, ?, 'cancelled', ?, ?)`)
+      .run(newId(), req.id, actor.label, trimmed, iso)
     consumeReviewTokens(ctx, req.id)
     recordAudit(ctx.db, now, {
-      actorType: 'admin', actorId: admin.id, action: 'payment_request.cancelled', entityType: 'payment_request', entityId: req.id,
-      details: { reason: trimmed }, ip: admin.ip
+      actorType: 'admin', actorId: actor.label, action: 'payment_request.cancelled', entityType: 'payment_request', entityId: req.id,
+      details: { reason: trimmed }, ip: actor.ip
     })
     ctx.notifier.storeInApp({
       kind: 'payment_cancelled', deviceId: req.device_id, requestId: req.id, subject: 'Payment request cancelled',
@@ -359,7 +382,7 @@ export function getRequestDetail(ctx: AppContext, id: string) {
     ? (ctx.db.prepare('SELECT request_id FROM payment_evidence WHERE sha256 = ? AND request_id != ?').all(evidence.sha256, id) as { request_id: string }[]).map((r) => r.request_id)
     : []
   const decision = ctx.db.prepare(
-    `SELECT dec.*, a.email AS admin_email FROM admin_decisions dec JOIN admins a ON a.id = dec.admin_id WHERE dec.request_id = ?`
+    `SELECT dec.*, dec.decided_by AS admin_email FROM admin_decisions dec WHERE dec.request_id = ?`
   ).get(id) as { decision: string; reason: string | null; created_at: string; admin_email: string } | undefined
   const subscription = ctx.db.prepare('SELECT * FROM subscriptions WHERE request_id = ?').get(id) as
     | { id: string; starts_at: string; expires_at: string | null }

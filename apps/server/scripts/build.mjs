@@ -8,7 +8,7 @@ const external = Object.keys(pkg.dependencies).filter((name) => !name.startsWith
 await build({
   entryPoints: {
     server: 'src/main.ts',
-    'create-admin': 'src/cli/create-admin.ts',
+    'review-passphrase': 'src/cli/review-passphrase.ts',
     migrate: 'src/cli/migrate.ts',
     backup: 'src/cli/backup.ts',
     'generate-keys': 'src/cli/generate-keys.ts',

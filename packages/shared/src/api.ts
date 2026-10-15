@@ -25,7 +25,32 @@ export interface PlanDto {
 
 export interface PlansResponse {
   plans: PlanDto[]
+  /** Optional extra payment details configured on the server (e.g. account or wallet). The app shows its own step-by-step instructions. */
   paymentInstructions: string | null
+  referenceCode: string
+  /** Whether payment requests can be submitted right now, and exactly why not. */
+  payments: PaymentAvailability
+}
+
+export interface PaymentAvailability {
+  available: boolean
+  /** Address the app emails every payment request to (with its Confirm Payment / Cancel Request links). */
+  businessEmail: string
+  /** Precise reason when unavailable (server configuration). */
+  problem: string | null
+  /** Machine-readable cause, so the app can show the exact setup steps. */
+  problemCode?: 'review_passphrase_missing' | 'business_email_missing' | null
+  /** One-time setup command for the server operator, when a setting is missing. */
+  setupCommand?: string | null
+}
+
+/** Returned when a payment request is created. The app emails these links to businessEmail
+ *  through the client's own SMTP connection. Acting on them requires the business's review
+ *  passphrase, so holding the links does not let anyone else approve the request. */
+export interface CreatedPaymentRequest {
+  request: PaymentRequestDto
+  review: { confirmUrl: string; cancelUrl: string; expiresAt: string }
+  businessEmail: string
   referenceCode: string
 }
 

@@ -1,7 +1,7 @@
 import type { Clock } from '../clock.js'
 import type { Db } from '../db/sqlite.js'
 import { newId } from '../security/tokens.js'
-import type { Mailer } from './mailer.js'
+import type { Mailer, MailMessage } from './mailer.js'
 
 export interface EmailNotification {
   kind: string
@@ -10,6 +10,15 @@ export interface EmailNotification {
   body: string
   requestId?: string
   deviceId?: string
+  /** Sent with the email only; never stored in the notifications table. */
+  attachments?: MailMessage['attachments']
+}
+
+export interface EmailOutcome {
+  status: 'sent' | 'failed' | 'skipped'
+  /** Why it was not sent (SMTP error or missing configuration). */
+  error: string | null
+  notificationId: string
 }
 
 export interface InAppNotification {
@@ -43,7 +52,7 @@ export class Notifier {
   }
 
   /** Queues an email; returns the delivery promise (also tracked for graceful shutdown/tests). */
-  email(n: EmailNotification): Promise<'sent' | 'failed' | 'skipped'> {
+  email(n: EmailNotification): Promise<EmailOutcome> {
     const id = newId()
     const now = this.clock.now().toISOString()
     const skipReason = !n.to ? 'No recipient address configured' : !this.mailer.configured ? 'SMTP is not configured' : null
@@ -51,19 +60,19 @@ export class Notifier {
       `INSERT INTO notifications (id, channel, kind, recipient, subject, body, request_id, device_id, status, error, created_at)
        VALUES (?, 'email', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(id, n.kind, n.to ?? '(none)', n.subject, n.body, n.requestId ?? null, n.deviceId ?? null, skipReason ? 'skipped' : 'queued', skipReason, now)
-    if (skipReason) return Promise.resolve('skipped')
+    if (skipReason) return Promise.resolve({ status: 'skipped', error: skipReason, notificationId: id })
 
     const delivery = this.mailer
-      .send({ to: n.to!, subject: n.subject, text: n.body })
-      .then(() => {
+      .send({ to: n.to!, subject: n.subject, text: n.body, attachments: n.attachments })
+      .then((): EmailOutcome => {
         this.db.prepare(`UPDATE notifications SET status = 'sent', sent_at = ?, error = NULL WHERE id = ?`).run(this.clock.now().toISOString(), id)
-        return 'sent' as const
+        return { status: 'sent', error: null, notificationId: id }
       })
-      .catch((err: unknown) => {
+      .catch((err: unknown): EmailOutcome => {
         const message = err instanceof Error ? err.message : String(err)
         this.log.error({ err: message, notificationId: id }, 'email delivery failed')
         this.db.prepare(`UPDATE notifications SET status = 'failed', error = ? WHERE id = ?`).run(message.slice(0, 500), id)
-        return 'failed' as const
+        return { status: 'failed', error: message.slice(0, 300), notificationId: id }
       })
     this.inFlight.add(delivery)
     void delivery.finally(() => this.inFlight.delete(delivery))

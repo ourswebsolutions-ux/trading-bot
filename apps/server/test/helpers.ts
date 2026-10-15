@@ -10,14 +10,18 @@ import { loadConfig } from '../src/config.js'
 import type { AppContext } from '../src/context.js'
 import { buildApp } from '../src/http/app.js'
 import { generateSigningKeyPair } from '../src/security/keys.js'
-import { createAdmin, type AdminRole } from '../src/services/admins.js'
 import { MemoryMailer } from '../src/services/mailer.js'
 import { setSetting } from '../src/services/settings.js'
 import { createPrivateKey, createPublicKey } from 'node:crypto'
 
 export const T0 = new Date('2026-01-10T12:00:00.000Z')
-export const ADMIN_EMAIL = 'owner@example.test'
-export const ADMIN_PASSWORD = 'correct horse battery staple'
+/** The business address that receives payment requests (the server default). */
+export const BUSINESS_EMAIL = 'ourswebsolutions@gmail.com'
+export const REVIEW_PASSPHRASE = 'correct horse battery staple'
+let passphraseHash: Promise<string> | null = null
+const hashOnce = () => (passphraseHash ??= import('@tradepilot/shared/passwords').then((m) => m.hashPassword(REVIEW_PASSPHRASE)))
+/** Review links returned to the app when each request was created (the app emails them). */
+const issuedLinks = new Map<string, { confirm: string; cancel: string }>()
 
 export interface Harness {
   app: FastifyInstance
@@ -27,9 +31,12 @@ export interface Harness {
   close: () => Promise<void>
 }
 
-export async function createHarness(opts: { configurePayments?: boolean } = {}): Promise<Harness> {
+export async function createHarness(opts: { paymentDetails?: string; passphrase?: boolean } = {}): Promise<Harness> {
   const dir = mkdtempSync(path.join(tmpdir(), 'tp-server-test-'))
-  const config = loadConfig({ NODE_ENV: 'test', DATA_DIR: dir, PUBLIC_BASE_URL: 'https://admin.example.test', ADMIN_NOTIFY_EMAIL: 'payments@example.test' })
+  const config = loadConfig({
+    NODE_ENV: 'test', DATA_DIR: dir, PUBLIC_BASE_URL: 'https://admin.example.test',
+    ...(opts.passphrase === false ? {} : { REVIEW_PASSPHRASE_HASH: await hashOnce() })
+  })
   const clock = new ManualClock(T0)
   const mailer = new MemoryMailer()
   const pair = generateSigningKeyPair()
@@ -39,9 +46,7 @@ export async function createHarness(opts: { configurePayments?: boolean } = {}):
     mailer,
     keys: { privateKey, publicKey: createPublicKey(privateKey), publicKeyBase64: pair.publicKeyBase64 }
   })
-  if (opts.configurePayments !== false) {
-    setSetting(ctx.db, 'payment_instructions', 'Send USDT (TRC20) to wallet TXYZ… and put your reference code in the memo.', T0, null)
-  }
+  if (opts.paymentDetails) setSetting(ctx.db, 'payment_instructions', opts.paymentDetails, T0, null)
   const app = await buildApp(ctx)
   return {
     app,
@@ -91,26 +96,23 @@ export async function submitPayment(
   fields: Partial<Record<'planCode' | 'transactionId' | 'contactEmail' | 'note' | 'amountCents', string>> = {},
   file: { filename: string; contentType: string; data: Buffer } | null = { filename: 'proof.png', contentType: 'image/png', data: PNG_1PX }
 ) {
-  const body = multipart({ planCode: 'monthly', transactionId: `TXN-${randomBytes(4).toString('hex')}`, ...fields } as Record<string, string>, file ?? undefined)
-  return h.app.inject({ method: 'POST', url: '/v1/payment-requests', payload: body.payload, headers: { ...body.headers, authorization: `Bearer ${token}` } })
+  const body = multipart({ planCode: 'monthly', transactionId: `TXN-${randomBytes(4).toString('hex')}`, contactEmail: 'client@example.test', ...fields } as Record<string, string>, file ?? undefined)
+  const res = await h.app.inject({ method: 'POST', url: '/v1/payment-requests', payload: body.payload, headers: { ...body.headers, authorization: `Bearer ${token}` } })
+  if (res.statusCode === 201) {
+    const created = res.json() as { request: { id: string }; review: { confirmUrl: string; cancelUrl: string } }
+    issuedLinks.set(created.request.id, { confirm: new URL(created.review.confirmUrl).pathname, cancel: new URL(created.review.cancelUrl).pathname })
+  }
+  return res
 }
 
-export async function createAdminAccount(h: Harness, role: AdminRole = 'superadmin', email = ADMIN_EMAIL): Promise<string> {
-  return createAdmin(h.ctx.db, h.clock.now(), { email, displayName: 'Owner', password: ADMIN_PASSWORD, role })
-}
-
-/** Performs the real login flow (GET form → CSRF cookie → POST) and returns cookie header + session CSRF token. */
 let ipCounter = 0
 const nextIp = () => `10.1.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`
 
-/** Confirm/Cancel URLs from the most recent admin email about a request. */
-export async function emailedLinks(h: Harness, requestId: string): Promise<{ confirm: string; cancel: string }> {
-  await h.ctx.notifier.idle()
-  const mail = [...h.mailer.sent].reverse().find((m) => m.text.includes(requestId) && m.text.includes('Confirm Payment:'))
-  if (!mail) throw new Error('no review email for request')
-  const confirm = /Confirm Payment:\s+(\S+)/.exec(mail.text)![1]!
-  const cancel = /Cancel Request:\s+(\S+)/.exec(mail.text)![1]!
-  return { confirm: new URL(confirm).pathname, cancel: new URL(cancel).pathname }
+/** Confirm/Cancel paths issued to the app for a request (the app emails them to the business). */
+export async function emailedLinks(_h: Harness, requestId: string): Promise<{ confirm: string; cancel: string }> {
+  const links = issuedLinks.get(requestId)
+  if (!links) throw new Error('no review links issued for request')
+  return links
 }
 
 /** Opens a review link like a browser: GET the page, keep the CSRF cookie, POST the form. */
@@ -118,7 +120,7 @@ export async function submitReview(
   h: Harness,
   path: string,
   fields: Record<string, string>,
-  opts: { email?: string; password?: string; remoteAddress?: string; origin?: string; skipCsrf?: boolean } = {}
+  opts: { remoteAddress?: string; origin?: string; skipCsrf?: boolean; passphrase?: string } = {}
 ) {
   const remoteAddress = opts.remoteAddress ?? nextIp()
   const page = await h.app.inject({ method: 'GET', url: path, remoteAddress })
@@ -130,7 +132,7 @@ export async function submitReview(
     url: path,
     remoteAddress,
     headers: { cookie: `${cookie.name}=${cookie.value}`, ...(opts.origin ? { origin: opts.origin } : {}) },
-    payload: { ...(opts.skipCsrf ? {} : { _csrf: csrf }), email: opts.email ?? ADMIN_EMAIL, password: opts.password ?? ADMIN_PASSWORD, ...fields }
+    payload: { ...(opts.skipCsrf ? {} : { _csrf: csrf }), passphrase: opts.passphrase ?? REVIEW_PASSPHRASE, ...fields }
   })
   return { page, res }
 }

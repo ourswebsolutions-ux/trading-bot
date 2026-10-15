@@ -7,6 +7,7 @@ import {
   isValidTransactionId,
   sniffImageMime,
   type ApiErrorBody,
+  type CreatedPaymentRequest,
   type PaymentRequestDto,
   type PlansResponse,
   type RegisterDeviceResponse,
@@ -16,6 +17,7 @@ import { getSetting, setSetting, type Db } from './db.js'
 import { evaluateEntitlement } from './entitlement.js'
 import { UserError } from './errors.js'
 import type { SecretStore } from './secrets.js'
+import type { SmtpMessage } from '@tradepilot/shared/smtp'
 import type { PlansView, ScreenshotSelection, SubmitPaymentInput, SubscriptionView } from '../shared/ipc.js'
 
 export interface SubscriptionDeps {
@@ -30,7 +32,28 @@ export interface SubscriptionDeps {
   fetch?: typeof fetch
   now?: () => Date
   onRemoteNotification?: (n: { id: string; kind: string; title: string; body: string; createdAt: string }) => void
+  /** The client's own SMTP connection; payment requests are emailed through it. */
+  clientEmail?: ClientEmail
 }
+
+export interface ClientEmail {
+  /** Null when the connection is configured; otherwise what the client must do. */
+  problem(): string | null
+  /** The client's sending (registered) address. */
+  address(): string | null
+  send(message: SmtpMessage): Promise<void>
+}
+
+const NO_CLIENT_EMAIL: ClientEmail = {
+  problem: () => 'Email is not available in this build.',
+  address: () => null,
+  send: async () => {
+    throw new Error('Email is not available in this build.')
+  }
+}
+
+const EXTENSIONS: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }
+const money = (cents: number, currency: string) => new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(cents / 100)
 
 const DEVICE_TOKEN = 'device.token'
 const REQUEST_TIMEOUT_MS = 20_000
@@ -112,14 +135,14 @@ export class SubscriptionService {
   }
 
   /** Calls an authenticated endpoint, (re-)registering the device once if its credential is missing or revoked. */
-  private async authed<T>(method: string, route: string, init: { body?: () => BodyInit } = {}): Promise<T> {
+  private async authed<T>(method: string, route: string, init: { body?: () => BodyInit; json?: unknown } = {}): Promise<T> {
     try {
       if (!this.d.secrets.get(DEVICE_TOKEN)) await this.register()
-      return await this.request<T>(method, route, { body: init.body?.() })
+      return await this.request<T>(method, route, { body: init.body?.(), json: init.json })
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         await this.register()
-        return this.request<T>(method, route, { body: init.body?.() })
+        return this.request<T>(method, route, { body: init.body?.(), json: init.json })
       }
       throw err
     }
@@ -197,8 +220,21 @@ export class SubscriptionService {
     if (!d.allowed) throw new UserError('subscription_required', `${feature} requires an active trial or subscription. ${this.configured ? d.detail : 'This build has no subscription server configured, so trials and subscriptions are unavailable.'}`)
   }
 
+  private get clientEmail(): ClientEmail {
+    return this.d.clientEmail ?? NO_CLIENT_EMAIL
+  }
+
   async plans(): Promise<PlansView> {
-    return this.wrap(() => this.authed<PlansResponse>('GET', '/v1/plans'))
+    return this.wrap(async () => {
+      const res = await this.authed<PlansResponse>('GET', '/v1/plans')
+      const problem = this.clientEmail.problem()
+      return {
+        ...res,
+        // servers before 1.0.1 did not report availability; their submit errors still say what is wrong
+        payments: res.payments ?? { available: true, businessEmail: 'ourswebsolutions@gmail.com', problem: null },
+        clientEmail: { configured: problem === null, address: this.clientEmail.address(), problem }
+      }
+    })
   }
 
   async requests(): Promise<PaymentRequestDto[]> {
@@ -223,28 +259,69 @@ export class SubscriptionService {
     const fields: Record<string, string> = {}
     if (!['monthly', 'lifetime'].includes(input.planCode)) fields.planCode = 'Select a plan'
     if (!isValidTransactionId(input.transactionId ?? '')) fields.transactionId = '6–64 letters, digits or - _ . / #'
-    if (input.contactEmail && !isValidEmail(input.contactEmail.trim())) fields.contactEmail = 'Enter a valid email or leave blank'
+    const contactEmail = (input.contactEmail?.trim() || this.clientEmail.address() || '').trim()
+    if (!isValidEmail(contactEmail)) fields.contactEmail = 'Enter your email address'
     if ((input.note ?? '').length > 500) fields.note = 'Max 500 characters'
     const shot = this.screenshots.get(input.screenshotId)
     if (!shot) fields.screenshot = 'Attach the payment screenshot'
     if (Object.keys(fields).length) throw new UserError('validation_failed', 'Please correct the highlighted fields.', fields)
+    // the request is emailed through the client's own SMTP connection, so it must be set up first
+    const emailProblem = this.clientEmail.problem()
+    if (emailProblem) throw new UserError('email_not_configured', emailProblem)
 
-    const created = await this.wrap(async () =>
-      (await this.authed<{ request: PaymentRequestDto }>('POST', '/v1/payment-requests', {
+    const created = await this.wrap(() =>
+      this.authed<CreatedPaymentRequest>('POST', '/v1/payment-requests', {
         body: () => {
           const form = new FormData()
           form.set('planCode', input.planCode)
           form.set('transactionId', input.transactionId.trim())
-          if (input.contactEmail?.trim()) form.set('contactEmail', input.contactEmail.trim())
+          form.set('contactEmail', contactEmail)
           if (input.note?.trim()) form.set('note', input.note.trim())
           form.set('screenshot', new Blob([new Uint8Array(shot!.bytes)], { type: shot!.mime }), shot!.name)
           return form
         }
-      })).request
+      })
     )
+    const r = created.request
+    const planName = input.planCode === 'lifetime' ? 'Lifetime' : 'Monthly'
+    try {
+      await this.clientEmail.send({
+        to: created.businessEmail,
+        subject: `[TradePilot] ${planName} payment request — ${money(r.amountCents, r.currency)} — ${created.referenceCode}`,
+        text: [
+          'A TradePilot client submitted a payment and asks you to confirm it.',
+          '',
+          `Client email:     ${contactEmail}`,
+          `Client reference: ${created.referenceCode}`,
+          `Plan:             ${planName}`,
+          `Amount:           ${money(r.amountCents, r.currency)}`,
+          `Transaction ID:   ${r.transactionId}`,
+          `Request ID:       ${r.id}`,
+          `Submitted:        ${r.createdAt}`,
+          ...(input.note?.trim() ? [`Client note:      ${input.note.trim()}`] : []),
+          '',
+          'The payment screenshot is attached. Verify that the funds arrived, then use one of these links:',
+          '',
+          `  Confirm Payment:  ${created.review.confirmUrl}`,
+          `  Cancel Request:   ${created.review.cancelUrl}`,
+          '',
+          'Opening a link changes nothing. The page shows the request and asks for your review passphrase',
+          'before anything is applied. The links work once and expire on ' + created.review.expiresAt.slice(0, 16).replace('T', ' ') + ' UTC.',
+          '',
+          'This email was sent from the client\'s own email account by the TradePilot app.'
+        ].join('\n'),
+        attachments: [{ filename: `payment-${r.transactionId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40)}.${EXTENSIONS[shot!.mime] ?? 'img'}`, content: shot!.bytes, contentType: shot!.mime }]
+      })
+    } catch (err) {
+      // never leave a request pending that the business was not told about
+      const why = err instanceof Error ? err.message : String(err)
+      await this.authed('DELETE', `/v1/payment-requests/${encodeURIComponent(r.id)}`, { json: { reason: `email failed: ${why.slice(0, 200)}` } }).catch(() => undefined)
+      await this.refresh().catch(() => undefined)
+      throw new UserError('payment_email_failed', `Your payment request could not be emailed to ${created.businessEmail}: ${why}. Nothing was submitted. Check Settings → SMTP Email (Send test email) and try again.`)
+    }
     this.screenshots.delete(input.screenshotId)
     await this.refresh()
-    return created
+    return r
   }
 
   private async wrap<T>(fn: () => Promise<T>): Promise<T> {

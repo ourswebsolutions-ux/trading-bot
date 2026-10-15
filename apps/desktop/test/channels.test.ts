@@ -1,53 +1,12 @@
 import assert from 'node:assert/strict'
-import { createServer, type Server } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 import { classifySmtpError, sendSmtp, verifySmtp, type SmtpSettings } from '@tradepilot/shared/smtp'
+import { fakeSmtp } from './fakeSmtp.js'
 import { WhatsAppClient, whatsappErrorFrom } from '../src/main/channels/whatsapp.js'
 import { redact, registerSecret } from '../src/main/redact.js'
 import { fakeFetch, integrationService, memoryDb, secretStore } from './helpers.js'
 
 /** Minimal SMTP server: AUTH PLAIN, rejects recipients starting with "reject". */
-function fakeSmtp(password: string): Promise<{ server: Server; port: number; received: string[] }> {
-  const received: string[] = []
-  const server = createServer((sock) => {
-    let data = false
-    let buf = ''
-    sock.write('220 fake.test ESMTP\r\n')
-    sock.on('data', (chunk) => {
-      buf += chunk.toString()
-      if (data) {
-        if (buf.includes('\r\n.\r\n')) {
-          received.push(buf)
-          buf = ''
-          data = false
-          sock.write('250 2.0.0 OK queued as FAKE123\r\n')
-        }
-        return
-      }
-      let idx
-      while ((idx = buf.indexOf('\r\n')) >= 0) {
-        const line = buf.slice(0, idx)
-        buf = buf.slice(idx + 2)
-        const cmd = line.toUpperCase()
-        if (cmd.startsWith('EHLO')) sock.write('250-fake.test\r\n250 AUTH PLAIN\r\n')
-        else if (cmd.startsWith('AUTH PLAIN')) {
-          const decoded = Buffer.from(line.split(' ')[2] ?? '', 'base64').toString()
-          sock.write(decoded.endsWith(`\u0000${password}`) ? '235 2.7.0 Authentication successful\r\n' : '535 5.7.8 Authentication credentials invalid\r\n')
-        } else if (cmd.startsWith('MAIL FROM')) sock.write('250 OK\r\n')
-        else if (cmd.startsWith('RCPT TO')) sock.write(cmd.includes('REJECT') ? '550 5.1.1 No such user\r\n' : '250 OK\r\n')
-        else if (cmd === 'DATA') {
-          data = true
-          sock.write('354 End data with <CR><LF>.<CR><LF>\r\n')
-        } else if (cmd === 'QUIT') {
-          sock.write('221 Bye\r\n')
-          sock.end()
-        } else if (cmd === 'RSET' || cmd === 'NOOP') sock.write('250 OK\r\n')
-        else sock.write('502 Command not implemented\r\n')
-      }
-    })
-  })
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: (server.address() as { port: number }).port, received })))
-}
 
 describe('SMTP (shared with the subscription server)', () => {
   let smtp: Awaited<ReturnType<typeof fakeSmtp>>
@@ -61,6 +20,16 @@ describe('SMTP (shared with the subscription server)', () => {
     assert.deepEqual(r.accepted, ['ops@fake.test'])
     assert.match(r.response, /250 2\.0\.0 OK queued as FAKE123/)
     assert.match(smtp.received.at(-1)!, /Subject: Hi/)
+  })
+
+  it('delivers a payment request with the screenshot attached through the client\'s SMTP connection', async () => {
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a8f30000000049454e44ae426082', 'hex')
+    await sendSmtp(cfg('right-password'), { to: 'ourswebsolutions@gmail.com', subject: '[TradePilot] Monthly payment request', text: 'Confirm Payment:  https://x/review/abc', attachments: [{ filename: 'payment-TXN-1.png', content: png, contentType: 'image/png' }] })
+    const raw = smtp.received.at(-1)!
+    assert.match(raw, /To: ourswebsolutions@gmail\.com/)
+    assert.match(raw, /Content-Type: image\/png; name=payment-TXN-1\.png/)
+    assert.match(raw, /Content-Disposition: attachment; filename=payment-TXN-1\.png/)
+    assert.ok(raw.replace(/\r?\n/g, '').includes(png.toString('base64')), 'screenshot bytes delivered')
   })
 
   it('reports authentication failures and rejected recipients accurately', async () => {

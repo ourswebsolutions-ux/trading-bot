@@ -29,11 +29,7 @@ npm run dev        # first run creates dev keys + .env files, starts the server,
 
 `npm run dev` prefixes output with `[server]` / `[desktop]`, and Ctrl+C stops both server and app (and everything they started). If port 8787 is taken — usually by a server left over from an earlier run, possibly started with `sudo` — it says so instead of starting; `PORT=8899 npm run dev` uses another port. It works from VS Code's terminal (it strips `ELECTRON_RUN_AS_NODE`). Don't run it with `sudo`.
 
-To try the payment flow locally, set `ADMIN_NOTIFY_EMAIL`, `PAYMENT_INSTRUCTIONS` and SMTP in `apps/server/.env`, and create the administrator who confirms payments from the emailed links:
-
-```bash
-npm run admin:create -w @tradepilot/server -- --email you@example.com --name "Your Name"
-```
+To enable payments locally, create the review passphrase once: `npm run review:passphrase -w @tradepilot/server -- --write` (stores only its hash in `apps/server/.env`), then restart `npm run dev`. In the app, configure Settings → SMTP Email: payment requests are emailed from the client's own account to `ADMIN_NOTIFY_EMAIL` (default `ourswebsolutions@gmail.com`) and confirmed or cancelled from the links in that email with the passphrase. No administrator account, dashboard or server SMTP is needed.
 
 Separate terminals still work: `npm run dev:server` and `npm run dev:desktop`. The first desktop launch asks you to create a password; for automated dev setups you may set `TRADEPILOT_DEV_INITIAL_PASSWORD` (development builds only, must pass the policy, must be changed at first sign-in). There is no built-in default password.
 
@@ -70,7 +66,7 @@ User API credentials (Delta Exchange, OpenAI, Anthropic, SMTP, WhatsApp) are ent
 - **Local login** (password only) protects the app on this computer. Hash: scrypt (N=2¹⁵, r=8, p=1). Five free attempts, then lockouts of 30 s doubling to 15 min, persisted across restarts. Auto-lock on idle, OS lock or sleep. Forgotten password → "Reset" wipes local data only.
 - **Subscription authorization** is decided by the server. On first unlock the app registers the machine (salted SHA-256 of the OS machine ID); the 72-hour trial is created server-side once per machine, so reinstalling, deleting data or changing the clock does not reset it.
 - The server returns an Ed25519-signed entitlement (default 12 h offline validity, never past the trial/plan end). The main process checks the signature, device, expiry and clock rollback before every paid action (create/edit strategies, backtests, paper orders). Subscription info, plans and payment history are always available.
-- Payments are manual: the client submits a transaction ID + screenshot; the business address receives an email with single-use, expiring **Confirm Payment** and **Cancel Request** links. Each opens a confirmation page (opening changes nothing) where the decision is submitted with an administrator sign-in. Approval is transactional and idempotent; duplicate transaction IDs, a second pending request, replayed links and conflicting decisions are rejected. Details: [docs/SERVER.md](docs/SERVER.md#5-payment-approval-by-email-no-administrator-dashboard).
+- Payments are manual: the client submits a transaction ID + screenshot; the app emails the business address (from the client's own SMTP account) with single-use, expiring **Confirm Payment** and **Cancel Request** links. Each opens a confirmation page (opening changes nothing) where the decision is submitted explicitly with the review passphrase; there are no administrator accounts or dashboard. Approval is transactional and idempotent; duplicate transaction IDs, a second pending request, replayed links and conflicting decisions are rejected. Details: [docs/SERVER.md](docs/SERVER.md#5-payment-approval-by-email-no-administrator-dashboard).
 
 ## Strategies (Phases 3 and 5)
 

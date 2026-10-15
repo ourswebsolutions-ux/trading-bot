@@ -16,10 +16,9 @@ import { _electron as electron, type ElectronApplication, type Page } from 'play
 import { createContext } from '../../server/src/bootstrap.js'
 import { loadConfig } from '../../server/src/config.js'
 import { buildApp } from '../../server/src/http/app.js'
-import { createAdmin } from '../../server/src/services/admins.js'
 import { MemoryMailer } from '../../server/src/services/mailer.js'
-import { approveRequest } from '../../server/src/services/payments.js'
-import { setSetting } from '../../server/src/services/settings.js'
+import { hashPassword } from '@tradepilot/shared/passwords'
+import { fakeSmtp } from '../test/fakeSmtp.js'
 import { explainDefinition, validateDefinition, type StrategyDefinition } from '../src/shared/strategyRules.js'
 import type { InterpretationTurn } from '../src/shared/ipc.js'
 
@@ -41,12 +40,13 @@ const shot = async (page: Page, name: string) => {
 async function main() {
   // ---------- server ----------
   const serverDir = mkdtempSync(path.join(tmpdir(), 'tp-e2e-server-'))
-  const config = loadConfig({ NODE_ENV: 'test', DATA_DIR: serverDir, PUBLIC_BASE_URL: 'http://127.0.0.1:8787' })
+  const REVIEW_PASSPHRASE = 'harbor review passphrase 58'
+  const config = loadConfig({ NODE_ENV: 'test', DATA_DIR: serverDir, PUBLIC_BASE_URL: 'http://127.0.0.1:8787', REVIEW_PASSPHRASE_HASH: await hashPassword(REVIEW_PASSPHRASE) })
+  // the client's own mail server (Settings → SMTP Email); payment requests are sent through it
+  const clientSmtp = await fakeSmtp()
   const mailer = new MemoryMailer()
   const ctx = createContext(config, { mailer })
-  setSetting(ctx.db, 'admin_notify_email', 'payments@example.test', new Date(), null)
-  setSetting(ctx.db, 'payment_instructions', 'Bank transfer\nAccount: TradePilot Ltd · IBAN XX00 0000 0000 0000\nMemo: your reference code', new Date(), null)
-  const adminId = await createAdmin(ctx.db, new Date(), { email: 'owner@example.test', displayName: 'Owner', password: 'correct horse battery', role: 'superadmin' })
+  // no payment instructions, administrator accounts or admin panel: the default business address receives requests
   const server = await buildApp(ctx)
   await server.listen({ port: 0, host: '127.0.0.1' })
   const apiUrl = `http://127.0.0.1:${(server.server.address() as AddressInfo).port}`
@@ -190,12 +190,28 @@ async function main() {
     await page.getByRole('cell', { name: 'flat' }).or(page.getByRole('button', { name: 'Close' })).first().waitFor()
     await shot(page, '06-trading')
 
-    step('subscription: submit payment, admin approves, access restored')
+    step('subscription: needs the client\'s email connection, sends the request via the client\'s SMTP, confirmed with the passphrase')
     await nav(page, 'Subscription')
     await page.getByText('$20').first().waitFor()
     await page.getByText('$500').first().waitFor()
+    await page.getByText('Configure your email connection before paying').waitFor()
+    assert.equal(await page.getByText('Payment requests are unavailable').count(), 0)
+    assert.equal(await page.getByText(/REVIEW_PASSPHRASE_HASH/).count(), 0, 'server is set up: no setup message')
     await shot(page, '07-subscription-plans')
     await page.getByRole('button', { name: 'Choose Monthly' }).click()
+    await page.getByText('Configure your email connection first').waitFor()
+    assert.equal(await page.getByRole('button', { name: 'Submit for review' }).isDisabled(), true, 'cannot submit without an email connection')
+    // the client configures their SMTP connection (here: a local test mail server without authentication)
+    const saved = await page.evaluate((port) => (window as unknown as { tradepilot: { invoke: (c: string, a: unknown) => Promise<{ ok: boolean }> } }).tradepilot.invoke('integrations:save', {
+      id: 'smtp', config: { host: '127.0.0.1', port: String(port), secure: 'false', requireTLS: 'false', from: 'Client <client@example.test>', testRecipient: 'client@example.test' }, secrets: {}
+    }), clientSmtp.port)
+    assert.equal(saved.ok, true, JSON.stringify(saved))
+    await nav(page, 'Dashboard')
+    await nav(page, 'Subscription')
+    await page.getByRole('button', { name: 'Choose Monthly' }).click()
+    await page.getByText(/For payment details, email/).waitFor()
+    assert.equal(await page.getByText('Configure your email connection first').count(), 0)
+    assert.equal(await page.getByLabel('Your email address').inputValue(), 'client@example.test', 'registered email from the SMTP settings')
     await app.evaluate(({ dialog }, file) => {
       dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [file] })) as typeof dialog.showOpenDialog
     }, proof)
@@ -207,10 +223,26 @@ async function main() {
     await page.getByRole('button', { name: 'Submit request' }).click()
     await page.getByText('Payment under review').waitFor({ timeout: 20_000 })
     await page.getByText('Pending review', { exact: true }).waitFor()
+    // delivered by the client's SMTP server to the business address, with the screenshot attached
+    const raw = clientSmtp.received.find((m) => m.includes('E2E-TXN-000123'))
+    assert.ok(raw, 'payment request delivered through the client\'s SMTP')
+    const text = raw.replace(/=\r\n/g, '')
+    assert.match(text, /To: ourswebsolutions@gmail\.com/)
+    assert.match(text, /Client email: +client@example\.test/)
+    assert.match(text, /Plan: +Monthly/)
+    assert.match(text, /Content-Disposition: attachment; filename=payment-E2E-TXN-000123\.png/)
     await ctx.notifier.idle()
-    assert.ok(mailer.sent.some((m) => m.subject.includes('New Monthly payment request')), 'admin notified by email')
-    const pending = ctx.db.prepare(`SELECT id FROM payment_requests WHERE status = 'pending'`).get() as { id: string }
-    approveRequest(ctx, { id: adminId, email: 'owner@example.test', ip: null }, pending.id)
+    assert.ok(!mailer.sent.some((m) => m.to === 'ourswebsolutions@gmail.com'), 'the server sent nothing itself')
+    // the recipient opens Confirm Payment: GET changes nothing, the decision needs the review passphrase
+    const confirmPath = new URL(/Confirm Payment:\s+(\S+)/.exec(text)![1]!).pathname
+    const reviewPage = await fetch(apiUrl + confirmPath)
+    assert.equal(reviewPage.status, 200)
+    assert.equal((ctx.db.prepare(`SELECT status FROM payment_requests WHERE transaction_id = 'E2E-TXN-000123'`).get() as { status: string }).status, 'pending', 'opening the link approves nothing')
+    const cookie = reviewPage.headers.get('set-cookie')!.split(';')[0]!
+    const csrf = /name="_csrf" value="([^"]+)"/.exec(await reviewPage.text())![1]!
+    const post = (passphrase: string) => fetch(apiUrl + confirmPath, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ _csrf: csrf, verified: 'yes', passphrase }) })
+    assert.equal((await post('the client guessing')).status, 401, 'the client cannot approve their own request')
+    assert.match(await (await post(REVIEW_PASSPHRASE)).text(), /Payment confirmed/)
     await page.getByRole('button', { name: 'Refresh' }).click()
     await page.getByText('Approved', { exact: true }).waitFor({ timeout: 20_000 })
     await page.getByText('Monthly').first().waitFor()
@@ -353,6 +385,7 @@ async function main() {
   } finally {
     await app.close()
     await server.close()
+    clientSmtp.server.close()
     await ctx.notifier.idle()
     ctx.db.close()
     rmSync(serverDir, { recursive: true, force: true })

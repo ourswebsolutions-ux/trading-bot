@@ -33,4 +33,4 @@ if (!existsSync(desktopEnv)) {
   writeFileSync(desktopEnv, `MAIN_VITE_API_BASE_URL=http://127.0.0.1:8787\nMAIN_VITE_ENTITLEMENT_PUBLIC_KEY=${der}\n`)
   console.log('created apps/desktop/.env')
 }
-console.log('\nNext:\n  npm run admin:create -w @tradepilot/server -- --email you@example.com --name "Your Name"\n  npm run dev:server     (terminal 1)\n  npm run dev:desktop    (terminal 2)\nThen sign in at http://127.0.0.1:8787/admin and set the payment instructions under Settings.')
+console.log('\nNext:\n  npm run review:passphrase -w @tradepilot/server -- --write   (the passphrase used to confirm payments)\n  npm run dev\nClients email payment requests to ADMIN_NOTIFY_EMAIL (default ourswebsolutions@gmail.com) through their own SMTP connection (Settings → SMTP Email); you confirm them from the links in that email with the passphrase.')
