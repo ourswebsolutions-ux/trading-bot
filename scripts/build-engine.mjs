@@ -58,7 +58,10 @@ if (withMt5) {
     '--workpath', path.join(engineDir, 'build'),
     '--specpath', path.join(engineDir, 'build'),
     '--paths', engineDir,
+    // MetaTrader5's compiled module imports numpy at run time, invisible to PyInstaller's analysis
     '--hidden-import', 'MetaTrader5',
+    '--hidden-import', 'numpy',
+    '--collect-all', 'MetaTrader5',
     path.join(engineDir, 'run_mt5_bridge.py')
   ])
   const bridge = path.join(out, 'tradepilot-mt5-bridge', 'tradepilot-mt5-bridge.exe')

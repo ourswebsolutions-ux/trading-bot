@@ -22,7 +22,8 @@ def load_mt5():
 
         return mt5, None
     except Exception as e:  # ImportError on non-Windows, or a broken install
-        return None, f"The MetaTrader5 Python package is not available ({type(e).__name__}: {e}). It requires Windows."
+        where = "Reinstall TradePilot (or the MetaTrader5 package)." if sys.platform == "win32" else "It requires Windows."
+        return None, f"The MetaTrader5 Python package is not available ({type(e).__name__}: {e}). {where}"
 
 
 class Server:
