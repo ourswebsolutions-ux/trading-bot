@@ -4,7 +4,7 @@ import { after, before, beforeEach, describe, it } from 'node:test'
 import { EngineBridge } from '../src/main/engine.js'
 import { ProviderError } from '../src/main/net.js'
 import { StrategyStore } from '../src/main/strategies.js'
-import { AutomationService } from '../src/main/trading/automation.js'
+import { AutomationService, type AutomationDeps } from '../src/main/trading/automation.js'
 import { PaperExchange, type ExchangeAdapter, type MarketOrderRequest, type OrderResult } from '../src/main/trading/exchange.js'
 import { DEFAULT_RISK } from '../src/shared/tradingRisk.js'
 import type { Candle, Instrument } from '../src/shared/ipc.js'
@@ -90,7 +90,7 @@ describe('automated trading', () => {
     })
   }
 
-  const service = () =>
+  const service = (over: Partial<AutomationDeps> = {}) =>
     new AutomationService({
       db,
       now: () => now,
@@ -108,7 +108,8 @@ describe('automated trading', () => {
       watchSymbols: () => {},
       alert: (a) => alerts.push(a.title),
       onChange: () => {},
-      sleep: async () => {}
+      sleep: async () => {},
+      ...over
     })
 
   const enabledStrategy = async (def: StrategyDefinition = ALWAYS_LONG) => {
@@ -405,5 +406,64 @@ describe('automated trading', () => {
     assert.equal(activity.sessions.length, 1)
     assert.equal(activity.trades.length, 1)
     assert.ok(activity.events.some((e) => /version 2/.test(e.message)))
+  })
+
+  // ---------- Phase 1: broker-neutral sizing ----------
+  /** Same market, sized in fractional lots: 1 lot = 1 BTC, steps of 0.01, at most 100 lots. */
+  const LOTS: Instrument = { ...INSTRUMENT, contractValue: null, valuePerPoint: 1, unitsPerVolume: 1, volumeStep: 0.01, volumeMin: 0.01, volumeMax: 100, volumeUnit: 'lots' }
+
+  it('Delta regression: whole contracts and the original engine inputs', async () => {
+    const seen: unknown[] = []
+    const svc = service({ engine: (m, p) => (m === 'session_evaluate' && seen.push((p as { instrument: unknown }).instrument), engine.request(m, p, 30_000)) })
+    svc.saveRisk({ ...DEFAULT_RISK, configured: true, maxOrderNotionalUsd: 100_000 })
+    const s = await enabledStrategy()
+    await svc.start(s.id, 'paper')
+    nextCandle()
+    await svc.tick()
+    assert.deepEqual(seen[0], { contractValue: 0.001, tickSize: 0.5, valuePerPoint: 0.001, unitsPerVolume: 0.001, volumeStep: 1, volumeMin: 1, volumeMax: null, volumeUnit: 'contracts' })
+    const pos = (await sessions(svc))[0]!.position!
+    assert.equal(pos.contracts, 50)
+    assert.ok(Number.isInteger(pos.contracts))
+    assert.equal(pos.contractValue, 0.001)
+  })
+
+  it('paper: sizes, fills and closes fractional lots with no leftover dust', async () => {
+    const svc = service({ instruments: async () => [LOTS], paperExchange: new PaperExchange(async () => mark, () => 1, () => 5) })
+    svc.saveRisk({ ...DEFAULT_RISK, configured: true, maxOrderNotionalUsd: 100_000 })
+    const s = await enabledStrategy()
+    await svc.start(s.id, 'paper')
+    nextCandle()
+    await svc.tick()
+    let ss = (await sessions(svc))[0]!
+    assert.equal(ss.position?.contracts, 0.05, '50% of 10,000 / 100,000 per lot = 0.05 lots')
+    assert.equal(ss.position?.contractValue, 1)
+    assert.equal((await svc.overview({})).orders[0]!.size, 0.05)
+    mark = 98_900
+    await svc.tick()
+    ss = (await sessions(svc))[0]!
+    assert.equal(ss.position, null, 'fully closed: no float remainder left open')
+    const trade = (await svc.overview({})).trades[0]!
+    assert.equal(trade.contracts, 0.05)
+    assert.ok(Math.abs(trade.grossPnl - (98_900 - 100_000) * 0.05) < 1e-9)
+    assert.ok(Math.abs(trade.fees - (0.05 * 100_000 + 0.05 * 98_900) * 5 / 10_000) < 1e-9, 'fees on the lot notional')
+  })
+
+  it('refuses an engine volume that is off-step or below the venue minimum', async () => {
+    let forced = 0.015
+    const tamper = (m: string, p: unknown) =>
+      engine.request<{ intent: { contracts?: number } }>(m, p, 30_000).then((r) => (m === 'session_evaluate' && r.intent.contracts ? { ...r, intent: { ...r.intent, contracts: forced } } : r))
+    const svc = service({ instruments: async () => [LOTS], engine: tamper as AutomationDeps['engine'], paperExchange: new PaperExchange(async () => mark, () => 1, () => 5) })
+    svc.saveRisk({ ...DEFAULT_RISK, configured: true, maxOrderNotionalUsd: 100_000 })
+    const s = await enabledStrategy()
+    await svc.start(s.id, 'paper')
+    nextCandle()
+    await svc.tick()
+    assert.equal((await sessions(svc))[0]!.position, null)
+    assert.equal((await svc.overview({})).orders.length, 0, 'nothing sent')
+    assert.ok((await svc.overview({})).events.some((e) => /invalid order size from the engine/.test(e.message)))
+    forced = 0.005
+    nextCandle()
+    await svc.tick()
+    assert.equal((await svc.overview({})).orders.length, 0, 'below 0.01 lots: nothing sent')
   })
 })

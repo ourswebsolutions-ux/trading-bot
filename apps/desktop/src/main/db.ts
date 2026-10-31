@@ -336,6 +336,54 @@ UPDATE automation_sessions SET strategy_version = 1, definition = (SELECT defini
 ALTER TABLE auto_trades ADD COLUMN strategy_version INTEGER;
 ALTER TABLE backtest_runs ADD COLUMN strategy_version INTEGER;
 `
+  },
+  {
+    version: 6,
+    name: 'broker_per_session',
+    sql: `
+-- Automations, orders and trades belong to a broker: Delta Exchange (all existing rows) or MetaTrader 5.
+ALTER TABLE automation_sessions ADD COLUMN broker TEXT NOT NULL DEFAULT 'delta' CHECK (broker IN ('delta', 'mt5'));
+ALTER TABLE auto_orders ADD COLUMN broker TEXT NOT NULL DEFAULT 'delta' CHECK (broker IN ('delta', 'mt5'));
+ALTER TABLE auto_trades ADD COLUMN broker TEXT NOT NULL DEFAULT 'delta' CHECK (broker IN ('delta', 'mt5'));
+-- one live automation per instrument and broker (BTCUSD can exist at both)
+DROP INDEX ux_automation_live_symbol;
+CREATE UNIQUE INDEX ux_automation_live_symbol ON automation_sessions(broker, symbol) WHERE status != 'stopped' AND mode = 'live';
+CREATE INDEX ix_auto_trades_broker ON auto_trades(broker, mode, exit_time);
+`
+  },
+  {
+    version: 7,
+    name: 'gold_manual_orders_account_guard',
+    sql: `
+-- the account (login and demo/real type) a live MT5 automation was started on; orders stop if it changes
+ALTER TABLE automation_sessions ADD COLUMN account_guard TEXT;
+-- manual BUY/SELL orders from the Gold Bot page, recorded before they are sent (one per request)
+CREATE TABLE manual_orders (
+  id TEXT PRIMARY KEY,
+  broker TEXT NOT NULL CHECK (broker IN ('delta', 'mt5')),
+  request_id TEXT NOT NULL UNIQUE,
+  client_order_id TEXT NOT NULL UNIQUE,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+  volume REAL NOT NULL CHECK (volume > 0),
+  stop_price REAL,
+  take_price REAL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'open', 'partially_filled', 'filled', 'cancelled', 'rejected', 'unknown')),
+  filled REAL NOT NULL DEFAULT 0,
+  avg_price REAL,
+  fee REAL NOT NULL DEFAULT 0,
+  exchange_order_id TEXT,
+  position_ticket INTEGER,
+  account_login TEXT NOT NULL,
+  account_mode TEXT NOT NULL CHECK (account_mode IN ('demo', 'contest', 'real')),
+  error TEXT,
+  -- e.g. "size reduced from 0.12 to 0.06 lots by your exposure limit"
+  note TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX ix_manual_orders_created ON manual_orders(created_at);
+`
   }
 ]
 
@@ -370,6 +418,10 @@ const LEGACY_REPAIRS: Record<number, Record<string, (db: Db) => void>> = {
       addSecretsEncryptedColumn(db)
       addNotificationsDismissedColumn(db)
     }
+  },
+  7: {
+    // development builds before manual_orders.note existed
+    d4248fed36408feed18c9ce775e18cedefae1aafca1879928356f20da97b690b: (db) => db.exec('ALTER TABLE manual_orders ADD COLUMN note TEXT')
   }
 }
 

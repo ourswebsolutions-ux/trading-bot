@@ -1,0 +1,5 @@
+# Windows only (win_amd64 wheels): the MetaTrader 5 bridge bundled into the Windows installer.
+# MetaTrader5 is MetaQuotes' official package; it talks to a locally installed, running MT5 terminal.
+# Not yet verified against a real terminal (development happens on Linux) — see docs/MT5.md.
+MetaTrader5==5.0.6231
+numpy==2.2.6

@@ -58,7 +58,7 @@ async function main() {
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
     await page.getByLabel('Confirm password').fill(PASSWORD)
     await page.getByRole('button', { name: 'Create password and continue' }).click()
-    await page.getByRole('heading', { name: 'Dashboard' }).waitFor({ timeout: 30_000 })
+    await page.getByRole('heading', { name: 'Gold Scalper' }).waitFor({ timeout: 30_000 })
     await shot(page, '01-dashboard')
 
     step('subscription status is reported honestly')
@@ -107,7 +107,8 @@ async function main() {
 
     step('live trading cannot be started accidentally')
     await nav(page, 'Trading')
-    await page.getByText('Exchange balance').waitFor({ timeout: 30_000 })
+    // Windows starts on MetaTrader 5 (gold), other systems on Delta Exchange
+    await page.getByText('Exchange balance').or(page.getByText('MetaTrader 5 balance')).first().waitFor({ timeout: 30_000 })
     const startLive = page.getByRole('button', { name: 'Start live' })
     if (await startLive.count()) for (const b of await startLive.all()) assert.equal(await b.isDisabled(), true)
     await page.getByText(/Live trading is (off|disabled)|Live trading/).first().waitFor()
@@ -122,7 +123,7 @@ async function main() {
     await page.getByRole('heading', { name: 'Welcome back' }).waitFor({ timeout: 30_000 })
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
     await page.getByRole('button', { name: 'Unlock' }).click()
-    await page.getByRole('heading', { name: 'Dashboard' }).waitFor({ timeout: 30_000 })
+    await page.getByRole('heading', { name: 'Gold Scalper' }).waitFor({ timeout: 30_000 })
     await shot(page, '06-after-restart')
     await closeAndConfirmExit(app)
     console.log(`\n✔ packaged smoke test passed (${process.platform}) — screenshots in ${shots}`)

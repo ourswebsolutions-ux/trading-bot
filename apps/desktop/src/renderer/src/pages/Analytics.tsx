@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { BacktestResult } from '@shared/ipc'
 import { MAX_BACKTEST_DAYS } from '@shared/strategySpec'
+import { venueOf } from '@shared/strategyRules'
 import { CandleChart, LineChart, type ChartMarker } from '../components/charts'
 import { PaywallBanner, useAccess } from '../components/paywall'
 import { Badge, Banner, Button, Empty, Field, Panel, Skeleton } from '../components/ui'
@@ -37,6 +38,8 @@ export function Analytics() {
   }, [strategies.data, strategyId])
   const selected = strategies.data?.find((s) => s.id === strategyId)
   const maxDays = selected?.timeframe ? MAX_BACKTEST_DAYS[selected.timeframe] : 365
+  const venue = selected ? venueOf(selected.definition) : 'delta'
+  const source = venue === 'mt5' ? 'your MetaTrader 5 terminal' : 'Delta Exchange'
   useEffect(() => {
     if (days > maxDays) setDays(maxDays)
   }, [maxDays, days])
@@ -78,7 +81,7 @@ export function Analytics() {
           <Empty icon="strategies" title="No strategies to analyse" action={<Button variant="primary" onClick={() => navigate('strategies')}>Create a strategy</Button>} />
         ) : (
           <div className="form-row" style={{ gridTemplateColumns: 'minmax(0, 2fr) repeat(3, minmax(0, 1fr)) auto', alignItems: 'end' }}>
-            <Field label="Strategy" hint="Historical candles are downloaded from Delta Exchange">
+            <Field label="Strategy" hint={`Historical candles are downloaded from ${source}`}>
               <select className="select" value={strategyId} onChange={(e) => { setStrategyId(e.target.value); setResult(null); setError(null) }}>
                 {strategies.data.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.symbol} {s.timeframe ?? '?'}{s.validation.valid ? '' : ' · needs attention'}</option>)}
               </select>
@@ -86,7 +89,7 @@ export function Analytics() {
             <Field label="Lookback (days)" hint={`Up to ${maxDays} days for ${selected?.timeframe ?? 'this'} candles`}>
               <input className="input mono" type="number" min={1} max={maxDays} value={days} onChange={(e) => setDays(Math.max(1, Math.min(maxDays, Number(e.target.value) || 1)))} />
             </Field>
-            <Field label="Fees (bps per side)" hint="Delta taker fee is about 5 bps">
+            <Field label="Fees (bps per side)" hint={venue === 'mt5' ? 'Broker commission, if any (the bid/ask spread is applied from the candle data)' : 'Delta taker fee is about 5 bps'}>
               <input className="input mono" type="number" min={0} max={100} step={0.5} value={feeBps ?? ''} onChange={(e) => setFeeBps(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} />
             </Field>
             <Field label="Slippage (bps per fill)" hint="Applied against every fill">
@@ -97,7 +100,7 @@ export function Analytics() {
             </div>
           </div>
         )}
-        {running && <p className="muted" style={{ margin: '4px 0 0' }}>Downloading {selected?.symbol} candles from Delta Exchange and running the Python engine{engine?.state !== 'ready' ? ' (starting engine)' : ''}…</p>}
+        {running && <p className="muted" style={{ margin: '4px 0 0' }}>Downloading {selected?.symbol} candles from {source} and running the Python engine{engine?.state !== 'ready' ? ' (starting engine)' : ''}…</p>}
         {selected && !selected.validation.valid && <div style={{ marginTop: 12 }}><Banner tone="warn" title="This strategy cannot be backtested yet">{selected.validation.errors[0]?.message} <Button size="sm" variant="ghost" onClick={() => navigate('strategies')}>Open strategies</Button></Banner></div>}
         {error && <div style={{ marginTop: 12 }}><Banner tone="bad" title="Backtest failed">{error}</Banner></div>}
         {strategies.data && strategies.data.length > 0 && (

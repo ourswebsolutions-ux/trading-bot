@@ -10,6 +10,9 @@ import { UserError } from './errors.js'
 import { v8n, type ActionContext, type IntegrationService, type IntegrationSpec } from './integrations.js'
 import type { MarketDataService, MarketSettings } from './marketData.js'
 import type { IntegrationId } from '../shared/ipc.js'
+import type { Mt5Connection } from './mt5/connection.js'
+import type { Mt5MarketData } from './mt5/marketData.js'
+import { marginModeOf, tradeModeOf } from './mt5/account.js'
 
 export const DEFAULT_OPENAI_MODEL = 'gpt-5'
 
@@ -19,6 +22,8 @@ export interface SpecDeps {
   usage: AiUsageTracker
   consents: ConsentStore
   defaultSymbol: () => string
+  /** MetaTrader 5 session and market data (absent in tests that do not exercise MT5). */
+  mt5?: () => { conn: Mt5Connection; market: Mt5MarketData }
   /** test seam */
   fetchImpl?: typeof fetch
 }
@@ -128,6 +133,44 @@ export function buildIntegrationSpecs(deps: SpecDeps): Record<IntegrationId, Int
         return `Authenticated with ${DELTA_REGIONS[region].label}: ${balances.length} wallet balance${balances.length === 1 ? '' : 's'}, ${products.length} live perpetuals, ${history}. Order placement is disabled in this release.`
       },
       extras: (ctx) => ({ regions: Object.values(DELTA_REGIONS).map((r) => ({ id: r.id, label: r.label })), region: deltaRegion(ctx.config) })
+    },
+
+    mt5: {
+      config: [
+        { key: 'server', required: true, validate: (v) => (/^[^\s].{0,99}$/.test(v) && !/[\r\n]/.test(v) ? null : 'Enter the trade server name exactly as shown in the MT5 login dialog (e.g. Broker-Demo)') },
+        { key: 'login', required: true, validate: (v) => (/^\d{1,20}$/.test(v) ? null : 'The login is your MT5 account number (digits only)') },
+        { key: 'terminalPath', required: false, validate: (v) => (/\.exe$/i.test(v) && v.length <= 400 ? null : 'Path to terminal64.exe, or leave empty to use the default installation') },
+        { key: 'deviationPoints', required: true, default: '20', validate: v8n.intRange(0, 1000) }
+      ],
+      secrets: [{ key: 'password', required: true }],
+      async test(ctx) {
+        const m = deps.mt5?.()
+        if (!m) throw new UserError('not_available', 'MetaTrader 5 support is not available in this build.')
+        const why = m.conn.client.unavailable()
+        if (why) throw new UserError('unsupported_platform', why)
+        ctx.progress('Starting the MT5 bridge and logging in to the terminal…')
+        await m.conn.reset()
+        await m.conn.ensure()
+        const [a, t] = await Promise.all([m.conn.account(), m.conn.terminal()])
+        ctx.progress('Loading symbols…')
+        const symbols = await m.market.instruments(true)
+        const mode = tradeModeOf(a)
+        deps.integrations().remember('mt5', 'account', { login: a.login, server: a.server, currency: a.currency, tradeMode: mode, marginMode: marginModeOf(a), company: a.company })
+        deps.integrations().remember('mt5', 'algoTrading', Boolean(t.trade_allowed && a.trade_allowed && a.trade_expert))
+        const offset = m.conn.serverOffset()
+        return [
+          `Logged in to ${a.server} (${a.company}) as ${a.login}: ${mode === 'real' ? 'REAL-MONEY' : mode} account in ${a.currency}, balance ${a.balance.toLocaleString('en-US', { maximumFractionDigits: 2 })}, ${marginModeOf(a)} positions.`,
+          `${symbols.length} tradable symbols.`,
+          t.trade_allowed && a.trade_allowed && a.trade_expert ? 'Algo Trading is allowed.' : 'Algo Trading is OFF in the terminal or for this account — turn on the "Algo Trading" button before live trading.',
+          offset === null ? 'Broker server time not determined yet (market closed?).' : `Broker server time UTC${offset >= 0 ? '+' : '-'}${Math.abs(offset) / 3600}h.`
+        ].join(' ')
+      },
+      extras: (_ctx, details) => ({
+        platformSupported: deps.mt5 ? deps.mt5().conn.client.unavailable() === null : false,
+        platformMessage: deps.mt5 ? deps.mt5().conn.client.unavailable() : 'Not available in this build.',
+        account: details.account ?? null,
+        algoTrading: details.algoTrading ?? null
+      })
     },
 
     marketdata: {

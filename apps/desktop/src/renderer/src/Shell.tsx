@@ -10,6 +10,7 @@ import type { MarketHealth } from '@shared/ipc'
 import { serverNow, useApp, type Page } from './lib/state'
 import { Analytics } from './pages/Analytics'
 import { Dashboard } from './pages/Dashboard'
+import { Gold } from './pages/Gold'
 import { Notifications } from './pages/Notifications'
 import { Settings } from './pages/Settings'
 import { Strategies } from './pages/Strategies'
@@ -17,6 +18,7 @@ import { Subscription } from './pages/Subscription'
 import { Trading } from './pages/Trading'
 
 const NAV: { page: Page; label: string; icon: IconName }[] = [
+  { page: 'gold', label: 'Gold Scalper', icon: 'bolt' },
   { page: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
   { page: 'strategies', label: 'Strategies', icon: 'strategies' },
   { page: 'trading', label: 'Trading', icon: 'trading' },
@@ -25,6 +27,7 @@ const NAV: { page: Page; label: string; icon: IconName }[] = [
   { page: 'settings', label: 'Settings', icon: 'settings' }
 ]
 const CRUMBS: Record<Page, string> = {
+  gold: 'XAUUSD scalping on MetaTrader 5: price, signal, account and controls',
   dashboard: 'Overview of markets, account and engine',
   strategies: 'Define and manage rule-based strategies',
   trading: 'Account, automation and orders',
@@ -148,6 +151,7 @@ export function Shell() {
           </button>
         </header>
         <main className="content">
+          {page === 'gold' && <Gold />}
           {page === 'dashboard' && <Dashboard />}
           {page === 'strategies' && <Strategies />}
           {page === 'trading' && <Trading />}

@@ -40,7 +40,7 @@ When a `vX.Y.Z` tag is pushed:
    - production build
    - production dependency audit
 2. **Package jobs.** One per platform: `ubuntu-22.04` (Linux x64), `windows-latest` (Windows x64), `macos-14` (macOS arm64) and `macos-15-intel` (macOS x64). Each one:
-   - builds the self-contained trading engine with PyInstaller ([`scripts/build-engine.mjs`](../scripts/build-engine.mjs)), so users need no Python;
+   - builds the self-contained trading engine with PyInstaller ([`scripts/build-engine.mjs`](../scripts/build-engine.mjs)), so users need no Python. On Windows it also builds the MetaTrader 5 bridge (`--mt5`, with `engine/requirements-mt5.txt`) and health-checks that it loads the MetaTrader5 package;
    - packages the installers;
    - **installs them on the clean runner** (`.deb` via apt, NSIS silently, `.dmg` mounted and copied; the AppImage is run directly);
    - runs [`apps/desktop/e2e/packaged.ts`](../apps/desktop/e2e/packaged.ts) against the installed app.
@@ -94,6 +94,8 @@ npm run build:engine                                          # engine/dist/trad
 TRADEPILOT_REQUIRE_BUNDLED_ENGINE=1 npm run package:desktop   # apps/desktop/release/<version>/
 npm run test:packaged -- "$PWD/apps/desktop/release/<version>/TradePilot-<version>-x86_64.AppImage"
 ```
+
+On Windows, include the MetaTrader 5 bridge: `python -m pip install -r engine/requirements-mt5.txt`, then `node scripts/build-engine.mjs python --mt5`. With `TRADEPILOT_REQUIRE_BUNDLED_ENGINE=1`, a Windows package build fails without it.
 
 Values in `apps/desktop/.env` are baked into local builds. Release builds take them only from the repository variables above.
 

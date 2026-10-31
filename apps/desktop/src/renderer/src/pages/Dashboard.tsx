@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { TIMEFRAMES } from '@shared/strategyRules'
 import type { IntegrationId, IntegrationView, Timeframe } from '@shared/ipc'
 import { CandleChart } from '../components/charts'
 import { Icon } from '../components/icons'
@@ -8,10 +9,12 @@ import { call } from '../lib/api'
 import { ago, compact, date, duration, money, pct, price, qty } from '../lib/format'
 import { useEvent, useNow, useResource } from '../lib/hooks'
 import { useLiveSeries, useMarketWatch } from '../lib/market'
+import { useBroker } from '../lib/broker'
 import { serverNow, useApp } from '../lib/state'
+import { Mt5AccountPanel } from '../components/mt5Account'
 
-const TF_DAYS: Record<Timeframe, number> = { '5m': 2, '15m': 5, '1h': 14, '4h': 45, '1d': 240 }
-const SERVICE_LABEL: Record<IntegrationId, string> = { delta: 'Delta Exchange account', marketdata: 'Market data', openai: 'OpenAI', anthropic: 'Anthropic Claude', smtp: 'SMTP email', whatsapp: 'WhatsApp Business' }
+const TF_DAYS: Record<Timeframe, number> = { '1m': 1, '5m': 2, '15m': 5, '30m': 10, '1h': 14, '4h': 45, '1d': 240 }
+const SERVICE_LABEL: Record<IntegrationId, string> = { delta: 'Delta Exchange account', mt5: 'MetaTrader 5', marketdata: 'Market data', openai: 'OpenAI', anthropic: 'Anthropic Claude', smtp: 'SMTP email', whatsapp: 'WhatsApp Business' }
 
 function AccessTile() {
   const { subscription, navigate } = useApp()
@@ -64,6 +67,7 @@ function Services({ integrations, health }: { integrations: IntegrationView[] | 
     return { tone: undefined, detail: 'Not configured' }
   }
   const md = health
+  const { broker } = useBroker()
   return (
     <Panel title="Services" flush>
       <ServiceRow
@@ -75,10 +79,10 @@ function Services({ integrations, health }: { integrations: IntegrationView[] | 
       <ServiceRow
         tone={!md ? undefined : md.transport === 'websocket' ? 'ok' : md.transport === 'rest' ? 'warn' : 'bad'}
         name="Market data"
-        detail={!md ? 'Starting…' : `${md.regionLabel} · ${md.transport === 'websocket' ? 'streaming' : md.transport === 'rest' ? 'REST polling' : 'offline'}${md.lastError ? ` · ${md.lastError}` : ''}`}
-        onClick={() => navigate('settings', { tab: 'marketdata' })}
+        detail={!md ? 'Starting…' : `${md.regionLabel} · ${md.transport === 'websocket' ? 'streaming' : md.transport === 'rest' ? (md.broker === 'mt5' ? 'terminal connected' : 'REST polling') : 'offline'}${md.lastError ? ` · ${md.lastError}` : ''}`}
+        onClick={() => navigate('settings', { tab: md?.broker === 'mt5' ? 'mt5' : 'marketdata' })}
       />
-      {(['delta', 'openai', 'anthropic', 'smtp', 'whatsapp'] as IntegrationId[]).map((id) => {
+      {([broker === 'mt5' ? 'mt5' : 'delta', 'openai', 'anthropic', 'smtp', 'whatsapp'] as IntegrationId[]).map((id) => {
         const d = describe(integ(id))
         return <ServiceRow key={id} tone={d.tone} name={SERVICE_LABEL[id]} detail={d.detail} onClick={() => navigate('settings', { tab: id })} />
       })}
@@ -134,16 +138,17 @@ function Account({ deltaState }: { deltaState: IntegrationView | undefined }) {
 }
 
 export function Dashboard() {
-  const { prefs, navigate } = useApp()
-  const [symbol, setSymbol] = useState(prefs?.defaultSymbol ?? 'BTCUSD')
+  const { navigate } = useApp()
+  const { broker, label: brokerLabel, defaultSymbol } = useBroker()
+  const [symbol, setSymbol] = useState(defaultSymbol)
   const [tf, setTf] = useState<Timeframe>('1h')
   useEffect(() => {
-    if (prefs?.defaultSymbol) setSymbol(prefs.defaultSymbol)
-  }, [prefs?.defaultSymbol])
+    setSymbol(defaultSymbol)
+  }, [defaultSymbol])
 
   const snap = useMarketWatch('dashboard', [symbol], { symbol, timeframe: tf })
   const live = useLiveSeries(symbol, tf, TF_DAYS[tf], snap?.health.connectionEpoch)
-  const tickers = useResource(() => call('market:tickers', {}), [snap?.health.region], { pollMs: 15_000 })
+  const tickers = useResource(() => call('market:tickers', {}), [snap?.health.region, broker], { pollMs: 15_000 })
   const integrations = useResource(() => call('integrations:list'), [])
   useEvent('integrations:progress', (p) => !p.step && void integrations.reload())
   const strategies = useResource(() => call('strategies:list'), [])
@@ -174,18 +179,18 @@ export function Dashboard() {
         <div className="panel tile">
           <span className="label">Selected instrument</span>
           <span className="value">{quote ? price(quote.lastPrice ?? quote.markPrice) : '—'}</span>
-          <span className="sub">{symbol} last trade · {quote?.exchangeTime ? `exchange time ${new Date(quote.exchangeTime).toISOString().slice(11, 19)} UTC` : unsupported ? 'not listed in this region' : 'waiting for data'}</span>
+          <span className="sub">{symbol} {broker === 'mt5' ? 'mid price' : 'last trade'} · {quote?.exchangeTime ? `${broker === 'mt5' ? 'tick' : 'exchange'} time ${new Date(quote.exchangeTime).toISOString().slice(11, 19)} UTC` : unsupported ? (broker === 'mt5' ? 'not offered by this broker' : 'not listed in this region') : 'waiting for data'}</span>
         </div>
       </div>
 
       <div className="grid split">
         <Panel
           title={<span style={{ display: 'inline-flex', gap: 12, alignItems: 'center' }}>{symbol}<QuoteLine q={quote} health={snap?.health} /></span>}
-          actions={<Segmented value={tf} onChange={setTf} options={(['5m', '15m', '1h', '4h', '1d'] as Timeframe[]).map((v) => ({ value: v, label: v }))} />}
+          actions={<Segmented value={tf} onChange={setTf} options={TIMEFRAMES.map((v) => ({ value: v, label: v }))} />}
         >
           {unsupported ? (
-            <Empty icon="alert" title={`${symbol} is not listed on ${snap?.health.regionLabel}`} action={<Button size="sm" onClick={() => navigate('settings', { tab: 'marketdata' })}>Choose an instrument</Button>}>Instruments differ by region.</Empty>
-          ) : live.error ? <ErrorState message={live.error} onRetry={live.reload} /> : !live.series ? <Skeleton height={380} /> : live.series.candles.length === 0 ? <Empty title="No candles" icon="trading">Delta Exchange returned no data for {symbol}.</Empty> : (
+            <Empty icon="alert" title={`${symbol} is not listed on ${snap?.health.regionLabel}`} action={<Button size="sm" onClick={() => navigate('settings', { tab: broker === 'mt5' ? 'mt5' : 'marketdata' })}>Choose an instrument</Button>}>{broker === 'mt5' ? 'Symbol names differ by broker (e.g. EURUSD, EURUSD.m).' : 'Instruments differ by region.'}</Empty>
+          ) : live.error ? <ErrorState message={live.error} onRetry={live.reload} /> : !live.series ? <Skeleton height={380} /> : live.series.candles.length === 0 ? <Empty title="No candles" icon="trading">{brokerLabel} returned no data for {symbol}.</Empty> : (
             <>
               <CandleChart candles={live.series.candles} height={380} />
               <div className="faint" style={{ fontSize: 11.5, display: 'flex', gap: 14, marginTop: 6, flexWrap: 'wrap' }}>
@@ -196,10 +201,10 @@ export function Dashboard() {
             </>
           )}
         </Panel>
-        <Panel title="Markets" actions={<span className="faint" style={{ fontSize: 11.5 }}>REST snapshot · {tickers.data?.[0] ? `updated ${ago(tickers.data[0].updatedAt, now)}` : '…'}</span>} flush>
+        <Panel title="Markets" actions={<span className="faint" style={{ fontSize: 11.5 }}>{broker === 'mt5' ? 'MT5 terminal' : 'REST snapshot'} · {tickers.data?.[0] ? `updated ${ago(tickers.data[0].updatedAt, now)}` : '…'}</span>} flush>
           {tickers.error ? <ErrorState message={tickers.error} onRetry={tickers.reload} /> : !tickers.data ? <div className="panel-body" style={{ display: 'grid', gap: 10 }}>{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} />)}</div> : (
             <table className="data">
-              <thead><tr><th>Contract</th><th className="r">Mark</th><th className="r">24h</th><th className="r">Vol</th></tr></thead>
+              <thead><tr><th>{broker === 'mt5' ? 'Symbol' : 'Contract'}</th><th className="r">{broker === 'mt5' ? 'Mid' : 'Mark'}</th><th className="r">24h</th><th className="r">Vol</th></tr></thead>
               <tbody>
                 {tickers.data.slice(0, 10).map((t) => (
                   <tr key={t.symbol} className="clickable" onClick={() => setSymbol(t.symbol)} style={t.symbol === symbol ? { boxShadow: 'inset 2px 0 0 var(--accent)' } : undefined}>
@@ -217,7 +222,7 @@ export function Dashboard() {
 
       <div className="grid cols-3">
         <Services integrations={integrations.data} health={snap?.health} />
-        <Account deltaState={integrations.data?.find((v) => v.id === 'delta')} />
+        {broker === 'mt5' ? <Mt5AccountPanel showPositions={false} /> : <Account deltaState={integrations.data?.find((v) => v.id === 'delta')} />}
         <Panel title="Recent backtests" actions={<Button size="sm" variant="ghost" onClick={() => navigate('analytics')}>Open analytics</Button>} flush>
           {(() => {
             const runs = active.filter((s) => s.lastBacktest).sort((a, b) => b.lastBacktest!.createdAt.localeCompare(a.lastBacktest!.createdAt)).slice(0, 5)
@@ -250,7 +255,7 @@ export function Dashboard() {
         )}
       </Panel>
       <p className="faint" style={{ margin: 0, fontSize: 11.5, display: 'flex', gap: 8, alignItems: 'center' }}>
-        <Badge tone="warn"><Icon name="lock" size={11} /> Live trading disabled</Badge> Prices: Delta Exchange. Freshness labels: Live = streaming and recent · Delayed = REST or brief gap · Stale = older than your threshold.
+        <Badge tone="warn"><Icon name="lock" size={11} /> Live trading off unless enabled</Badge> Prices: {brokerLabel}. Freshness labels: Live = {broker === 'mt5' ? 'recent tick' : 'streaming and recent'} · Delayed = {broker === 'mt5' ? 'brief gap' : 'REST or brief gap'} · Stale = older than your threshold{broker === 'mt5' ? ' · Market closed = no ticks over the weekend or session break' : ''}.
       </p>
     </div>
   )

@@ -10,6 +10,10 @@
  * (built by `node scripts/build-engine.mjs`), so users do not need Python. Set
  * TRADEPILOT_REQUIRE_BUNDLED_ENGINE=1 (CI does) to fail the build if it is missing.
  *
+ * MetaTrader 5 bridge (Windows only): engine/dist/tradepilot-mt5-bridge, built by
+ * `node scripts/build-engine.mjs python --mt5` on Windows with engine/requirements-mt5.txt installed.
+ * Windows release builds require it when TRADEPILOT_REQUIRE_BUNDLED_ENGINE=1.
+ *
  * Code signing (optional; builds are unsigned without it):
  *   Windows: CSC_LINK / CSC_KEY_PASSWORD (or WIN_CSC_LINK) + TRADEPILOT_WIN_PUBLISHER (certificate subject CN).
  *   macOS:   CSC_LINK / CSC_KEY_PASSWORD (Developer ID Application) + APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID for notarization.
@@ -28,6 +32,13 @@ const bundledEngine = path.resolve(__dirname, '../../engine/dist/tradepilot-engi
 const hasBundledEngine = existsSync(bundledEngine)
 if (!hasBundledEngine && process.env.TRADEPILOT_REQUIRE_BUNDLED_ENGINE === '1') {
   throw new Error(`Bundled engine missing at ${bundledEngine}. Run: node scripts/build-engine.mjs`)
+}
+
+const bundledMt5 = path.resolve(__dirname, '../../engine/dist/tradepilot-mt5-bridge')
+const hasBundledMt5 = existsSync(bundledMt5)
+const buildingWindows = process.platform === 'win32' || process.argv.includes('--win') || process.argv.includes('-w')
+if (buildingWindows && !hasBundledMt5 && process.env.TRADEPILOT_REQUIRE_BUNDLED_ENGINE === '1') {
+  throw new Error(`Bundled MT5 bridge missing at ${bundledMt5}. Run on Windows: node scripts/build-engine.mjs python --mt5`)
 }
 
 const macSigned = Boolean(process.env.CSC_LINK || process.env.CSC_NAME)
@@ -64,6 +75,12 @@ module.exports = {
   deb: { packageName: 'tradepilot', artifactName: 'tradepilot_${version}_${arch}.${ext}', depends: ['libgtk-3-0', 'libnotify4', 'libnss3', 'libxss1', 'libxtst6', 'xdg-utils', 'libatspi2.0-0', 'libuuid1', 'libsecret-1-0'] },
   win: {
     target: [{ target: 'nsis', arch: ['x64'] }],
+    // MetaTrader 5 exists only on Windows: the bridge sources (developer packages) and the bundled bridge
+    extraResources: [
+      { from: '../../engine/tradepilot_mt5', to: 'engine/tradepilot_mt5', filter: ['**/*.py'] },
+      { from: '../../engine/run_mt5_bridge.py', to: 'engine/run_mt5_bridge.py' },
+      ...(hasBundledMt5 ? [{ from: bundledMt5, to: 'engine/mt5' }] : [])
+    ],
     icon: 'build/icon.png',
     // electron-updater verifies the downloaded installer is signed by this publisher.
     ...(process.env.TRADEPILOT_WIN_PUBLISHER ? { signtoolOptions: { publisherName: [process.env.TRADEPILOT_WIN_PUBLISHER] } } : {})

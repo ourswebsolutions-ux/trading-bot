@@ -22,7 +22,7 @@ class BacktestError(ValueError):
 def _candles(raw: List[Dict[str, Any]]) -> Dict[str, List[float]]:
     if not isinstance(raw, list) or len(raw) < 30:
         raise BacktestError("at least 30 candles are required")
-    cols: Dict[str, List[float]] = {"time": [], "open": [], "high": [], "low": [], "close": []}
+    cols: Dict[str, List[float]] = {"time": [], "open": [], "high": [], "low": [], "close": [], "spread": [], "volume": []}
     last_time = -math.inf
     for i, c in enumerate(raw):
         try:
@@ -36,6 +36,12 @@ def _candles(raw: List[Dict[str, Any]]) -> Dict[str, List[float]]:
         last_time = t
         for k, v in zip(("time", "open", "high", "low", "close"), (t, o, h, l, cl)):
             cols[k].append(v)
+        # optional bid/ask spread in price units (MetaTrader 5 bars are bid prices); 0 when absent
+        sp = c.get("spread")
+        cols["spread"].append(float(sp) if isinstance(sp, (int, float)) and not isinstance(sp, bool) and math.isfinite(sp) and sp > 0 else 0.0)
+        # optional volume (MetaTrader 5: tick volume, the number of price changes); 0 when absent
+        vol = c.get("volume")
+        cols["volume"].append(float(vol) if isinstance(vol, (int, float)) and not isinstance(vol, bool) and math.isfinite(vol) and vol > 0 else 0.0)
     return cols
 
 

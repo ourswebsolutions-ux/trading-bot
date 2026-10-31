@@ -4,6 +4,7 @@ import {
   LIMITS,
   TIMEFRAMES,
   diffDefinitions,
+  venueOf,
   explainDefinition,
   validateDefinition,
   type Condition,
@@ -13,7 +14,7 @@ import {
   type RuleGroup,
   type StrategyDefinition
 } from '../../shared/strategyRules.js'
-import type { ChatMessage, InterpretationTurn } from '../../shared/ipc.js'
+import type { BrokerId, ChatMessage, InterpretationTurn } from '../../shared/ipc.js'
 import { AiError, runJson, type AiProvider, type AiSettings, type AiUsageTracker } from './provider.js'
 
 const nullable = (schema: Record<string, unknown>) => ({ anyOf: [schema, { type: 'null' }] })
@@ -88,24 +89,46 @@ export const INTERPRETATION_SCHEMA: Record<string, unknown> = {
   }
 }
 
-export function systemPrompt(symbols: string[], base?: StrategyDefinition): string {
+/** The schema for a venue: MetaTrader 5 also allows pips for stops and targets. Delta's is unchanged. */
+export function interpretationSchema(venue: BrokerId = 'delta'): Record<string, unknown> {
+  if (venue === 'delta') return INTERPRETATION_SCHEMA
+  const schema = structuredClone(INTERPRETATION_SCHEMA) as { properties: { strategy: { properties: Record<string, unknown> } } }
+  schema.properties.strategy.properties.stopLoss = typed(['percent', 'points', 'atr', 'pips'])
+  schema.properties.strategy.properties.takeProfit = typed(['percent', 'points', 'risk_multiple', 'pips'])
+  return schema as unknown as Record<string, unknown>
+}
+
+export function systemPrompt(symbols: string[], base?: StrategyDefinition, venue: BrokerId = 'delta'): string {
+  const mt5 = venue === 'mt5'
   const indicators = Object.entries(INDICATORS)
-    .map(([k, s]) => `- ${k}: ${s.label}; period ${s.period[0]}–${s.period[1]}${s.stdDev ? `; stdDev ${s.stdDev[0]}–${s.stdDev[1]}` : ''}${s.range ? `; values ${s.range[0]}–${s.range[1]}` : ''}`)
+    .map(([k, s]) => `- ${k}: ${s.label}; period ${s.period[0]}–${s.period[1]}${s.stdDev ? `; stdDev ${s.stdDev[0]}–${s.stdDev[1]}` : ''}${s.slow ? `; period is the fast EMA (usually 12); slow ${s.slow[2]} and signal ${s.signal![2]} are used` : ''}${s.range ? `; values ${s.range[0]}–${s.range[1]}` : ''}`)
     .join('\n')
   return `You translate a trader's description into TradePilot strategy rules. Your output is a proposal that the trader reviews; it is never executed automatically and is not verified trading logic.
 
 TradePilot model:
-- Instrument: one Delta Exchange perpetual futures contract from this list (the trader's region): ${symbols.slice(0, 200).join(', ') || '(list unavailable — ask the trader for the exact contract symbol)'}.
+${
+    mt5
+      ? `- Instrument: one symbol offered by the trader's MetaTrader 5 broker (forex pairs, metals, indices or other CFDs), from this list; names are broker-specific (EURUSD, EURUSD.m, XAUUSD#…): ${symbols.slice(0, 300).join(', ') || '(list unavailable — ask the trader for the exact MT5 symbol name)'}.`
+      : `- Instrument: one Delta Exchange perpetual futures contract from this list (the trader's region): ${symbols.slice(0, 200).join(', ') || '(list unavailable — ask the trader for the exact contract symbol)'}.`
+  }
 - Timeframes: ${TIMEFRAMES.join(', ')}. Direction: long, short or both.
 - Indicators (give each a short lower-case id such as "rsi_14"):
 ${indicators}
 - Conditions compare two operands: an indicator id, a price field (open/high/low/close), or a number. Comparators: ${COMPARATORS.join(', ')}. Groups combine conditions with "all" or "any".
 - entryLong = buy rules, entryShort = sell-short rules, exitLong/exitShort = optional rule-based exits.
-- stopLoss: percent of entry price, price points (absolute price distance), or atr (multiple of ATR 14).
+${
+    mt5
+      ? `- stopLoss: percent of entry price, price points (absolute price distance), pips (the broker's pip size: 0.0001 on most forex pairs, 0.01 on JPY pairs), or atr (multiple of ATR 14).
+- takeProfit (optional): percent, points, pips, or risk_multiple (multiple of the stop distance).
+- sizing: percent_equity (position value as % of capital), risk_percent (% of capital lost if the stop is hit), or fixed_quantity (lots, e.g. 0.10). Sizes are rounded down to the broker's lot step.
+- allocatedCapitalUsd (optional): amount in the account currency set aside for this strategy; percent sizing then applies to it instead of the whole account.
+- Daily loss limit: maxDailyLossPct (% of equity) and/or maxDailyLossUsd (an amount in the account currency). At least one is required. maxTradesPerDay is required.`
+      : `- stopLoss: percent of entry price, price points (absolute price distance), or atr (multiple of ATR 14).
 - takeProfit (optional): percent, points, or risk_multiple (multiple of the stop distance).
 - sizing: percent_equity (position value as % of capital), risk_percent (% of capital lost if the stop is hit), or fixed_quantity (contracts).
 - allocatedCapitalUsd (optional): USD amount set aside for this strategy; percent sizing then applies to it instead of the whole account.
-- Daily loss limit: maxDailyLossPct (% of equity) and/or maxDailyLossUsd (USD). At least one is required. maxTradesPerDay is required.
+- Daily loss limit: maxDailyLossPct (% of equity) and/or maxDailyLossUsd (USD). At least one is required. maxTradesPerDay is required.`
+  }
 - One instrument and ONE timeframe per strategy. Conditions on a second timeframe cannot be expressed.
 - Not available: other indicators (MACD, VWAP, stochastic, volume, Ichimoku…), trailing stops, pyramiding/averaging down, martingale, hedging, grids, news or sentiment, options, several instruments, time-of-day filters, leverage settings.
 
@@ -114,8 +137,13 @@ Rules you must follow:
 2. Put anything vague (e.g. "oversold" without a level, "the trend is bullish", "small position", "tight stop") in "ambiguities" and ask a concrete question instead of choosing a value. You may suggest concrete options in the question (for example "close above the 50-period EMA, or the 20 EMA above the 50 EMA?") but do not pick one.
 2b. "Use X% of my capital per trade" means percent_equity; "risk X% per trade" means risk_percent. If it is unclear which is meant, ask. If the trader mentions allocated capital without an amount, set allocatedCapitalUsd null and ask for the amount.
 2c. Never replace something unsupported with a similar-looking rule. List each requested element you cannot express in "unsupported" as "<what was requested>: <why it cannot be implemented>", and ask how to proceed.
-3. Instruments outside the list (forex pairs such as EUR/USD, stocks, spot) are not available: list them in "unsupported", keep symbol null and ask which listed contract to use.
-4. Pips do not apply to these contracts. Ask the trader to restate pip distances as a percent or as price points for the chosen contract.
+${
+    mt5
+      ? `3. Symbols not in the list are not available at this broker (suffixes such as .m or # matter; "EUR/USD" usually means EURUSD): if the intended symbol is unclear, keep symbol null and ask which listed symbol to use. List anything the broker does not offer in "unsupported".
+4. Pips are allowed for stops and targets (type "pips"). Markets close at weekends and between sessions; no rule can depend on session or clock times — list such requests in "unsupported".`
+      : `3. Instruments outside the list (forex pairs such as EUR/USD, stocks, spot) are not available: list them in "unsupported", keep symbol null and ask which listed contract to use.
+4. Pips do not apply to these contracts. Ask the trader to restate pip distances as a percent or as price points for the chosen contract.`
+  }
 5. Use status "ready" only when every required item is known and unambiguous; otherwise "needs_clarification" (or "unsupported" if nothing in the request can be expressed).
 6. Ask at most 5 short, specific questions at a time. In "summary", restate in one or two sentences what you understood and what is still open.
 7. When the trader answers, return the complete updated strategy, keeping everything already agreed.
@@ -147,13 +175,15 @@ const UNSUPPORTED_TERMS: [RegExp, string][] = [
 ]
 
 const TF_WORDS: [RegExp, string][] = [
-  [/\b(5|five)[- ]?(minute|min|m)\b/i, '5m'],
-  [/\b(15|fifteen)[- ]?(minute|min|m)\b/i, '15m'],
-  [/\b(1|one)[- ]?(hour|hr|h)\b|\bhourly\b/i, '1h'],
-  [/\b(4|four)[- ]?(hour|hr|h)\b/i, '4h'],
-  [/\b(1|one)[- ]?(day|d)\b|\bdaily (chart|candle|timeframe)\b/i, '1d']
+  [/\b(1|one)[- ]?(minute|min|m)\b|\bM1\b/i, '1m'],
+  [/\b(5|five)[- ]?(minute|min|m)\b|\bM5\b/i, '5m'],
+  [/\b(15|fifteen)[- ]?(minute|min|m)\b|\bM15\b/i, '15m'],
+  [/\b(30|thirty)[- ]?(minute|min|m)\b|\bM30\b/i, '30m'],
+  [/\b(1|one)[- ]?(hour|hr|h)\b|\bhourly\b|\bH1\b/i, '1h'],
+  [/\b(4|four)[- ]?(hour|hr|h)\b|\bH4\b/i, '4h'],
+  [/\b(1|one)[- ]?(day|d)\b|\bdaily (chart|candle|timeframe)\b|\bD1\b/i, '1d']
 ]
-const OTHER_TF = /\b(1|one|3|three|30|thirty)[- ]?(minute|min)s?\b|\b(2|two|6|six|8|eight|12|twelve)[- ]?(hour|hr)s?\b|\bweekly\b/i
+const OTHER_TF = /\b(3|three|10|ten)[- ]?(minute|min)s?\b|\b(2|two|6|six|8|eight|12|twelve)[- ]?(hour|hr)s?\b|\bweekly\b/i
 
 export interface CrossCheck {
   /** Contradictions between the trader's words and the interpreted rules; they block saving until resolved. */
@@ -163,16 +193,27 @@ export interface CrossCheck {
 }
 
 /** Deterministic checks of the interpretation against what the trader actually wrote. */
-export function crossCheck(userText: string, d: StrategyDefinition): CrossCheck {
+export function crossCheck(userText: string, d: StrategyDefinition, venue: BrokerId = 'delta'): CrossCheck {
   const conflicts: string[] = []
   const unsupported: string[] = []
-  for (const [re, why] of UNSUPPORTED_TERMS) if (re.test(userText)) unsupported.push(`${why} (noticed in your description by TradePilot)`)
+  for (const [re, why] of UNSUPPORTED_TERMS) {
+    // pips are a valid unit on MetaTrader 5 forex symbols
+    if (venue === 'mt5' && /pips/.test(why)) continue
+    if (re.test(userText)) unsupported.push(`${why} (noticed in your description by TradePilot)`)
+  }
   const mentioned = [...new Set(TF_WORDS.filter(([re]) => re.test(userText)).map(([, tf]) => tf))]
   const other = userText.match(OTHER_TF)?.[0]
   if (other) unsupported.push(`"${other}" is not an available timeframe, and time-based exits are not supported; strategies run on ${TIMEFRAMES.join(', ')} candles.`)
   if (mentioned.length > 1) unsupported.push(`Your description mentions several timeframes (${mentioned.join(', ')}). A strategy runs on one timeframe; conditions on a second timeframe cannot be implemented.`)
   if (mentioned.length === 1 && d.timeframe && d.timeframe !== mentioned[0]) conflicts.push(`You mentioned the ${mentioned[0]} timeframe, but the interpreted rules use ${d.timeframe}.`)
   return { conflicts, unsupported }
+}
+
+const MT5_QUESTIONS: Record<string, string> = {
+  symbol: 'Which symbol at your MetaTrader 5 broker should this strategy trade (for example EURUSD)?',
+  'risk.stopLoss': 'Where should the stop-loss be (pips, percent of entry price, price points, or a multiple of ATR)?',
+  'risk.sizing': 'How large should each position be (percent of equity, percent of equity risked at the stop, or a fixed number of lots)?',
+  'risk.maxDailyLossPct': 'What is the maximum loss per day (a percent of equity or an amount in your account currency) after which no new trades should open?'
 }
 
 const REQUIRED_QUESTIONS: Record<string, string> = {
@@ -205,7 +246,7 @@ function toGroup(g: RawGroup): RuleGroup | null {
 }
 
 /** Maps the model's proposal onto a definition without filling any gaps (fees are a backtest cost assumption, not a rule). */
-export function toDefinition(raw: Record<string, unknown>, feeBps = 5): StrategyDefinition {
+export function toDefinition(raw: Record<string, unknown>, feeBps = 5, venue: BrokerId = 'delta'): StrategyDefinition {
   const num = (v: unknown) => (typeof v === 'number' ? v : null)
   const s = (raw.strategy ?? {}) as Record<string, unknown>
   const indicators = (Array.isArray(s.indicators) ? s.indicators : []).slice(0, LIMITS.indicators).map(
@@ -222,9 +263,11 @@ export function toDefinition(raw: Record<string, unknown>, feeBps = 5): Strategy
   }
   return {
     version: 2,
+    ...(venue === 'mt5' ? { venue } : {}),
     name: String(s.name ?? '').slice(0, 80),
     description: String(s.description ?? '').slice(0, 2000),
-    symbol: typeof s.symbol === 'string' ? s.symbol.toUpperCase().trim() : '',
+    // MT5 symbol names are case-sensitive and broker-specific (EURUSD.m); Delta tickers are upper-case
+    symbol: typeof s.symbol === 'string' ? (venue === 'mt5' ? s.symbol.trim() : s.symbol.toUpperCase().trim()) : '',
     timeframe: (TIMEFRAMES as string[]).includes(String(s.timeframe)) ? (s.timeframe as StrategyDefinition['timeframe']) : null,
     direction: ['long', 'short', 'both'].includes(String(s.direction)) ? (s.direction as StrategyDefinition['direction']) : null,
     indicators,
@@ -254,8 +297,12 @@ export async function interpretTurn(
   settings: AiSettings,
   symbols: string[],
   /** When modifying a saved strategy: its current definition. */
-  base?: StrategyDefinition
+  base?: StrategyDefinition,
+  /** Broker the strategy is for (a modification keeps the base strategy's broker). */
+  venueArg?: BrokerId
 ): Promise<InterpretationTurn> {
+  const venue: BrokerId = base ? venueOf(base) : (venueArg ?? 'delta')
+  const q = (key: string) => (venue === 'mt5' ? MT5_QUESTIONS[key] : undefined) ?? REQUIRED_QUESTIONS[key]!
   const convo = messages.slice(-20).map((m) => ({ role: m.role, content: m.content.slice(0, 6000) }))
   if (convo.length === 0 || convo.at(-1)!.role !== 'user') throw new AiError('invalid_request', 'Send a message describing the strategy.')
   if (convo.at(-1)!.content.trim().length < 3) throw new AiError('invalid_request', 'The message is too short.')
@@ -263,12 +310,12 @@ export async function interpretTurn(
   const result = await runJson(
     provider,
     tracker,
-    { purpose: base ? 'strategy_modification' : 'strategy_interpretation', system: systemPrompt(symbols, base), messages: convo, schemaName: 'strategy_interpretation', schema: INTERPRETATION_SCHEMA },
+    { purpose: base ? 'strategy_modification' : 'strategy_interpretation', system: systemPrompt(symbols, base, venue), messages: convo, schemaName: 'strategy_interpretation', schema: interpretationSchema(venue) },
     settings
   )
   const raw = result.data as Record<string, unknown>
   if (!raw || typeof raw !== 'object' || !raw.strategy) throw new AiError('invalid_output', 'The model returned an unexpected structure.')
-  const definition = toDefinition(raw, base?.risk.feeBps ?? 5)
+  const definition = toDefinition(raw, base?.risk.feeBps ?? (venue === 'mt5' ? 0 : 5), venue)
   if (base) {
     // name and description are labels, not trading rules: keep them if the model dropped them
     if (!definition.name.trim()) definition.name = base.name
@@ -281,15 +328,15 @@ export async function interpretTurn(
   // TradePilot's own completeness check, independent of what the model claims
   const errorPaths = new Set(validation.errors.map((e) => e.path))
   const missing: string[] = []
-  if (!definition.symbol) missing.push(REQUIRED_QUESTIONS.symbol!)
-  if (!definition.timeframe) missing.push(REQUIRED_QUESTIONS.timeframe!)
-  if (!definition.direction) missing.push(REQUIRED_QUESTIONS.direction!)
-  if (errorPaths.has('entry.long') && !definition.entry.long) missing.push(REQUIRED_QUESTIONS['entry.long']!)
-  if (errorPaths.has('entry.short') && !definition.entry.short) missing.push(REQUIRED_QUESTIONS['entry.short']!)
-  for (const key of ['stopLoss', 'sizing', 'maxTradesPerDay'] as const) if (definition.risk[key] === null) missing.push(REQUIRED_QUESTIONS[`risk.${key}`]!)
-  if (definition.risk.maxDailyLossPct === null && definition.risk.maxDailyLossUsd == null) missing.push(REQUIRED_QUESTIONS['risk.maxDailyLossPct']!)
+  if (!definition.symbol) missing.push(q('symbol'))
+  if (!definition.timeframe) missing.push(q('timeframe'))
+  if (!definition.direction) missing.push(q('direction'))
+  if (errorPaths.has('entry.long') && !definition.entry.long) missing.push(q('entry.long'))
+  if (errorPaths.has('entry.short') && !definition.entry.short) missing.push(q('entry.short'))
+  for (const key of ['stopLoss', 'sizing', 'maxTradesPerDay'] as const) if (definition.risk[key] === null) missing.push(q(`risk.${key}`))
+  if (definition.risk.maxDailyLossPct === null && definition.risk.maxDailyLossUsd == null) missing.push(q('risk.maxDailyLossPct'))
   const userText = messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
-  const checks = crossCheck(userText, definition)
+  const checks = crossCheck(userText, definition, venue)
   missing.push(...checks.conflicts)
   const unsupported = [...strList(raw.unsupported), ...checks.unsupported]
   const nothingUsable = !definition.entry.long && !definition.entry.short

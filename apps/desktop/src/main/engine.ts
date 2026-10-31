@@ -61,6 +61,8 @@ export class EngineBridge {
       windowsHide: true
     })
     this.child = child
+    // writing to an engine that already exited fails with EPIPE; the exit handler reports it
+    child.stdin.on('error', () => undefined)
     child.stderr.on('data', (d: Buffer) => (this.stderrTail = (this.stderrTail + d.toString()).slice(-2000)))
     createInterface({ input: child.stdout }).on('line', (line) => this.onLine(line))
     const failAll = (message: string) => {

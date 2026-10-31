@@ -65,7 +65,10 @@ export interface SubmitPaymentInput {
 }
 
 // ---------- settings & integrations ----------
-export type IntegrationId = 'delta' | 'openai' | 'anthropic' | 'smtp' | 'whatsapp' | 'marketdata'
+export type IntegrationId = 'delta' | 'mt5' | 'openai' | 'anthropic' | 'smtp' | 'whatsapp' | 'marketdata'
+/** Trading venues. Delta Exchange (crypto perpetuals) or MetaTrader 5 (forex/CFDs via a local terminal, Windows only). */
+export type BrokerId = 'delta' | 'mt5'
+export const BROKER_LABEL: Record<BrokerId, string> = { delta: 'Delta Exchange', mt5: 'MetaTrader 5' }
 export type ConnectionState = 'not_configured' | 'untested' | 'connected' | 'failed'
 export interface IntegrationActionResult {
   action: string
@@ -106,6 +109,10 @@ export interface GeneralPreferences {
   autoInstallUpdates: boolean
   pythonPath: string
   defaultSymbol: string
+  /** Active broker: market data, account view and new strategies use it. */
+  broker: BrokerId
+  /** Default chart symbol when MetaTrader 5 is active (broker-specific name, e.g. EURUSD or EURUSD.m). */
+  defaultSymbolMt5: string
 }
 export interface SecretStorageInfo {
   available: boolean
@@ -115,7 +122,7 @@ export interface SecretStorageInfo {
 
 // ---------- strategies, engine, market, paper ----------
 export type StrategyType = 'sma_cross' | 'ema_cross' | 'rsi_reversion' | 'breakout'
-export type Timeframe = '5m' | '15m' | '1h' | '4h' | '1d'
+export type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d'
 
 export interface Strategy {
   id: string
@@ -170,6 +177,8 @@ export interface BacktestOptions {
   /** Adverse price movement applied to every simulated fill (basis points). */
   slippageBps: number
   initialEquity?: number
+  /** MetaTrader 5: broker commission per lot and side, in the account currency. */
+  commissionPerLot?: number
 }
 
 export interface ChatMessage {
@@ -225,6 +234,16 @@ export interface BacktestMetrics {
   maxConsecutiveLosses?: number
   daysBlockedByTradeLimit?: number
   daysBlockedByLossLimit?: number
+  signalsSkippedBelowMinVolume?: number
+  signalsSkippedSpread?: number
+  signalsSkippedSession?: number
+  signalsSkippedEvent?: number
+  signalsSkippedMarket?: number
+  signalsSkippedCooldown?: number
+  daysBlockedByLossStreak?: number
+  avgTradeDurationSec?: number | null
+  maxConsecutiveWins?: number
+  timeExits?: number
 }
 export interface BacktestTrade {
   side: 'long' | 'short'
@@ -271,6 +290,8 @@ export interface Candle {
   low: number
   close: number
   volume: number
+  /** MT5 only: bid/ask spread in price units (bars are bid prices). */
+  spread?: number
 }
 export interface Ticker {
   symbol: string
@@ -284,8 +305,8 @@ export interface Ticker {
   fundingRate: number | null
   updatedAt: string
 }
-/** live: streaming and fresh · delayed: REST polling or brief stream gap · stale: older than allowed · unavailable: no data */
-export type DataState = 'live' | 'delayed' | 'stale' | 'unavailable'
+/** live: streaming and fresh · delayed: REST polling or brief stream gap · stale: older than allowed · closed: market session closed (MT5) · unavailable: no data */
+export type DataState = 'live' | 'delayed' | 'stale' | 'closed' | 'unavailable'
 export type DeltaRegionId = 'india' | 'global' | 'india_testnet' | 'global_testnet'
 
 export interface Quote {
@@ -308,7 +329,9 @@ export interface Quote {
 }
 
 export interface MarketHealth {
-  region: DeltaRegionId
+  broker: BrokerId
+  /** Delta region, or 'mt5' for MetaTrader 5. */
+  region: DeltaRegionId | 'mt5'
   regionLabel: string
   transport: 'websocket' | 'rest' | 'offline'
   socket: 'disabled' | 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
@@ -341,6 +364,26 @@ export interface Instrument {
   tickSize: number
   contractValue: number | null
   tradingStatus: string | null
+  venue?: BrokerId
+  /** Price digits and pip size (MT5: 10 points on 3/5-digit symbols, else 1 point). */
+  digits?: number
+  pipSize?: number | null
+  /** e.g. "forex", "metals", "indices", "crypto" (from the broker's symbol path). */
+  assetClass?: string | null
+  /** Smallest stop/target distance from the market price, in price units (MT5 trade_stops_level). */
+  minStopDistance?: number | null
+  /** Units per lot (MT5 trade_contract_size, e.g. 100,000 for forex). */
+  contractSize?: number | null
+  // Broker-neutral sizing (see shared/sizing.ts). Omitted fields mean whole Delta contracts.
+  /** Account-currency value of a 1.0 price move for 1 unit of volume. */
+  valuePerPoint?: number | null
+  /** Underlying units per 1 unit of volume (fixed-quantity sizing). */
+  unitsPerVolume?: number | null
+  volumeStep?: number | null
+  volumeMin?: number | null
+  volumeMax?: number | null
+  /** "contracts" or "lots". */
+  volumeUnit?: string
 }
 
 export interface CandleGap {
@@ -364,6 +407,144 @@ export interface LiveCandle {
   timeframe: Timeframe
   candle: Candle
   receivedAt: string
+}
+
+export interface Mt5AccountView {
+  configured: boolean
+  /** False on Linux/macOS: MetaTrader 5 needs Windows with the MT5 terminal. */
+  platformSupported: boolean
+  fetchedAt: string | null
+  error: string | null
+  account: {
+    login: number
+    server: string
+    name: string
+    company: string
+    currency: string
+    balance: number
+    equity: number
+    margin: number
+    marginFree: number
+    leverage: number
+    /** demo / contest / real, as the broker reports it. */
+    tradeMode: 'demo' | 'contest' | 'real'
+    /** netting or hedging position accounting. */
+    marginMode: 'netting' | 'exchange' | 'hedging'
+    tradeAllowed: boolean
+    terminalTradeAllowed: boolean
+  } | null
+  positions: { ticket: number; symbol: string; side: 'long' | 'short'; volume: number; priceOpen: number; sl: number | null; tp: number | null; profit: number; swap: number; magic: number; comment: string }[]
+}
+
+// ---------- XAUUSD Gold Bot ----------
+export interface GoldAnalysis {
+  time: number
+  close: number
+  trend: 'up' | 'down' | 'sideways'
+  /** EMA periods used for the trend (9/20/50 for scalping). */
+  emaPeriods: [number, number, number]
+  emaFast: number | null
+  emaMid: number | null
+  emaSlow: number | null
+  rsi: number | null
+  macd: { line: number | null; signal: number | null; histogram: number | null }
+  momentum: 'rising' | 'falling' | 'flat' | null
+  atr: number | null
+  atrAverage: number | null
+  volatility: 'low' | 'normal' | 'high' | 'extreme' | null
+  /** Range of the last candle in ATRs (a spike shows here first). */
+  lastRangeAtr: number | null
+  vwap: number | null
+  support: number | null
+  resistance: number | null
+  pattern: string
+  enoughHistory: boolean
+}
+
+export interface GoldSignalView {
+  /** What the bot's rules say on the latest closed candle (the same evaluation the bot runs). */
+  action: 'buy' | 'sell' | 'wait'
+  reason: string
+  /** Risk controls or filters that would stop an entry right now. */
+  blockedBy: string[]
+  entry: number | null
+  stopLoss: number | null
+  takeProfit: number | null
+  lots: number | null
+  candleTime: number | null
+}
+
+export interface GoldPositionView {
+  /** MT5 ticket as text, or "paper:<session id>" for a simulated position. */
+  id: string
+  ticket: number | null
+  side: 'long' | 'short'
+  volume: number
+  openPrice: number
+  stopLoss: number | null
+  takeProfit: number | null
+  /** Floating profit incl. swap, in the account currency (paper: estimated). */
+  profit: number | null
+  /** bot = opened by the Gold Bot, manual = your BUY/SELL buttons, other = not opened by TradePilot. */
+  source: 'bot' | 'manual' | 'other'
+  paper: boolean
+  sessionId: string | null
+}
+
+export interface GoldManualOrderView {
+  id: string
+  side: 'buy' | 'sell'
+  volume: number
+  state: OrderState
+  avgPrice: number | null
+  stopLoss: number | null
+  takeProfit: number | null
+  ticket: number | null
+  accountLogin: string
+  accountMode: 'demo' | 'contest' | 'real'
+  error: string | null
+  /** Anything the user should know, e.g. a size reduced to fit a limit. */
+  note: string | null
+  createdAt: string
+}
+
+export interface GoldStatus {
+  settings: import('./gold').GoldSettings
+  risk: import('./tradingRisk').TradingRiskSettings
+  platformSupported: boolean
+  configured: boolean
+  connected: boolean
+  /** Disconnected with the Disconnect button (no automatic reconnect until Connect). */
+  userDisconnected: boolean
+  connectionError: string | null
+  symbol: string | null
+  symbolSource: 'settings' | 'detected' | null
+  candidates: import('./gold').GoldCandidate[]
+  spec: { digits: number; tickSize: number; contractSize: number | null; valuePerPoint: number | null; volumeMin: number | null; volumeMax: number | null; volumeStep: number | null; minStopDistance: number | null; currency: string | null } | null
+  quote: { bid: number; ask: number; spread: number; time: string | null; state: DataState } | null
+  account: { login: number; server: string; currency: string; balance: number; equity: number; marginFree: number; leverage: number; mode: 'demo' | 'contest' | 'real'; algoTrading: boolean } | null
+  /** Why the selected demo/live mode does not match the logged-in account (orders are refused). */
+  accountModeProblem: string | null
+  /** Entry timeframe (M1/M5) analysis. */
+  analysis: GoldAnalysis | null
+  analysisError: string | null
+  /** Trend timeframe (M15 by default). */
+  trendAnalysis: GoldAnalysis | null
+  signal: GoldSignalView | null
+  signalError: string | null
+  bot: {
+    strategyId: string | null
+    strategyProblem: string | null
+    session: AutomationSessionView | null
+  }
+  /** "Automatic trading" switch: TradePilot may send orders to the MT5 account. */
+  liveEnabled: boolean
+  emergency: boolean
+  positions: GoldPositionView[]
+  stats: { source: 'account' | 'paper'; currency: string; todayPnl: number; todayTrades: number; totalTrades: number; winRatePct: number | null; netPnl: number; days: number; currentStreak: number; maxWinStreak: number; maxLossStreak: number }
+  manualOrders: GoldManualOrderView[]
+  events: AutomationEventView[]
+  updatedAt: string
 }
 
 export interface DeltaAccountView {
@@ -396,8 +577,12 @@ export type OrderState = 'pending' | 'open' | 'partially_filled' | 'filled' | 'c
 
 export interface AutoPosition {
   side: 'long' | 'short'
+  /** Position volume in the venue's unit: whole contracts on Delta, possibly fractional lots elsewhere. */
   contracts: number
+  /** Account-currency value of a 1.0 price move per unit of volume (Delta: the contract value). */
   contractValue: number
+  /** MT5 position ticket (closing orders and reconciliation refer to it). */
+  ticket?: number | null
   entryPrice: number
   entryTime: string
   stopPrice: number | null
@@ -407,6 +592,7 @@ export interface AutoPosition {
 
 export interface AutomationSessionView {
   id: string
+  broker: BrokerId
   strategyId: string | null
   strategyName: string
   symbol: string
@@ -434,6 +620,7 @@ export interface AutomationSessionView {
 
 export interface AutoOrderView {
   id: string
+  broker: BrokerId
   sessionId: string
   mode: AutomationMode
   symbol: string
@@ -455,6 +642,7 @@ export interface AutoOrderView {
 
 export interface AutoTradeView {
   id: string
+  broker: BrokerId
   sessionId: string
   mode: AutomationMode
   symbol: string
@@ -480,12 +668,16 @@ export interface AutomationEventView {
 }
 
 export interface LiveTradingState {
+  broker: BrokerId
   enabled: boolean
   enabledAt: string | null
-  region: DeltaRegionId
+  /** Delta region, or 'mt5'. */
+  region: DeltaRegionId | 'mt5'
   regionLabel: string
   testnet: boolean
   checks: { id: string; label: string; ok: boolean; detail: string }[]
+  /** MetaTrader 5 only: the account the last connection test logged in to. */
+  account?: { login: number; server: string; tradeMode: 'demo' | 'contest' | 'real'; currency: string } | null
 }
 
 export interface TradingOverview {
@@ -600,15 +792,16 @@ export interface IpcContract {
   'market:watch': [{ view: string; symbols: string[]; chart?: { symbol: string; timeframe: Timeframe } | null }, MarketSnapshot]
   'market:unwatch': [{ view: string }, void]
   'market:snapshot': [void, MarketSnapshot]
-  'market:instruments': [{ refresh?: boolean }, Instrument[]]
+  'market:instruments': [{ refresh?: boolean; venue?: BrokerId }, Instrument[]]
 
   'account:summary': [{ refresh?: boolean }, DeltaAccountView]
+  'mt5:account': [{ refresh?: boolean }, Mt5AccountView]
   'account:orders': [void, { orders: ExchangeOrder[]; error: string | null; fetchedAt: string | null; configured: boolean }]
 
   'trading:overview': [void, TradingOverview]
   'trading:saveRisk': [import('./tradingRisk').TradingRiskSettings, TradingOverview]
-  'trading:enableLive': [{ password: string; confirmation: string }, TradingOverview]
-  'trading:disableLive': [void, TradingOverview]
+  'trading:enableLive': [{ password: string; confirmation: string; accountConfirmation?: string; broker?: BrokerId }, TradingOverview]
+  'trading:disableLive': [{ broker?: BrokerId } | void, TradingOverview]
   'trading:emergencyStop': [void, TradingOverview]
   'trading:clearEmergency': [void, TradingOverview]
   'automation:start': [{ strategyId: string; mode: AutomationMode }, TradingOverview]
@@ -617,9 +810,23 @@ export interface IpcContract {
   'automation:stop': [{ sessionId: string; closePosition: boolean }, TradingOverview]
   'automation:applyVersion': [{ sessionId: string }, TradingOverview]
 
-  'ai:interpretStrategy': [{ provider?: AiProviderId; messages: ChatMessage[]; baseStrategyId?: string }, InterpretationTurn]
+  'ai:interpretStrategy': [{ provider?: AiProviderId; messages: ChatMessage[]; baseStrategyId?: string; venue?: BrokerId }, InterpretationTurn]
   'ai:getPreferences': [void, AiPreferences]
   'ai:savePreferences': [AiPreferences, AiPreferences]
+
+  'gold:status': [{ refresh?: boolean } | void, GoldStatus]
+  'gold:saveSettings': [{ settings: import('./gold').GoldSettings; confirmLive?: boolean }, GoldStatus]
+  'gold:detectSymbol': [void, GoldStatus]
+  'gold:start': [void, GoldStatus]
+  'gold:stop': [{ closePosition: boolean }, GoldStatus]
+  'gold:order': [{ side: 'buy' | 'sell'; requestId: string }, { order: GoldManualOrderView; status: GoldStatus }]
+  'gold:closePosition': [{ id: string; confirmForeign?: boolean }, GoldStatus]
+  'gold:closeAll': [void, { closed: number; failed: string[]; status: GoldStatus }]
+  'gold:modifyPosition': [{ id: string; stopLoss: number | null; takeProfit: number | null }, GoldStatus]
+  'gold:candles': [{ timeframe: '1m' | '5m' | '15m' }, CandleSeries]
+  'gold:backtest': [{ days: number; slippageBps: number }, BacktestResult]
+  'gold:connect': [void, GoldStatus]
+  'gold:disconnect': [void, GoldStatus]
 
   'paper:placeOrder': [{ symbol: string; side: 'buy' | 'sell'; quantity: number }, PaperOrder]
   'paper:orders': [void, PaperOrder[]]
@@ -664,9 +871,10 @@ export const CHANNELS: Channel[] = [
   'strategies:list', 'strategies:get', 'strategies:save', 'strategies:validate', 'strategies:setEnabled', 'strategies:delete', 'strategies:duplicate', 'strategies:backtest', 'strategies:versions', 'strategies:activity',
   'engine:status', 'engine:restart',
   'market:tickers', 'market:symbols', 'market:candles', 'market:series', 'market:watch', 'market:unwatch', 'market:snapshot', 'market:instruments',
-  'account:summary', 'account:orders', 'ai:interpretStrategy', 'ai:getPreferences', 'ai:savePreferences',
+  'account:summary', 'account:orders', 'mt5:account', 'ai:interpretStrategy', 'ai:getPreferences', 'ai:savePreferences',
   'trading:overview', 'trading:saveRisk', 'trading:enableLive', 'trading:disableLive', 'trading:emergencyStop', 'trading:clearEmergency',
   'automation:start', 'automation:pause', 'automation:resume', 'automation:stop', 'automation:applyVersion',
+  'gold:status', 'gold:saveSettings', 'gold:detectSymbol', 'gold:start', 'gold:stop', 'gold:order', 'gold:closePosition', 'gold:closeAll', 'gold:modifyPosition', 'gold:candles', 'gold:backtest', 'gold:connect', 'gold:disconnect',
   'paper:placeOrder', 'paper:orders', 'paper:positions', 'paper:closePosition', 'paper:reset',
   'notifications:list', 'notifications:markRead', 'notifications:clear',
   'updates:state', 'updates:check', 'updates:install',

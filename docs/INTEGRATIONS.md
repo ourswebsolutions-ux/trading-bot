@@ -18,6 +18,18 @@ Each Settings section shows: masked credential fields, Save, **Test connection**
 - Signed requests: `api-key`, `timestamp`, `signature = hex(HMAC-SHA256(secret, method + timestamp + path + query + body))`, re-signed on every retry. `expired_signature` almost always means the computer clock is wrong.
 - Read-only data shown when authorized: wallet balances, open positions (Dashboard → Exchange account) and order history (Trading → Exchange order history). The private-endpoint response mapping is covered by mocked tests; it has **not** been exercised against a real account yet (no credentials were available).
 
+## MetaTrader 5
+
+Forex and CFDs through your broker's MT5 terminal, using MetaQuotes' official `MetaTrader5` Python package. It needs **Windows** with the terminal installed. Credentials:
+
+- trade server and login, kept in the settings;
+- password, kept in the OS keychain;
+- optional terminal path and maximum price deviation.
+
+The connection test reports whether the account is demo, contest or **real money**, whether Algo Trading is allowed, and the broker's server time. Choose MetaTrader 5 as the **Active broker** in Settings → General to use its prices and account across the app.
+
+This has not yet been verified against a real terminal. See [MT5.md](MT5.md) for details, limitations and the Windows demo-account verification steps.
+
 ## Market data
 
 - WebSocket channels: `v2/ticker` for watched instruments (Delta publishes ≈ every 5 s) and `candlestick_<tf>` for the chart on screen. Heartbeats are enabled; 20 s without traffic counts as a dead link. Reconnects back off 1 → 2 → 5 → 10 → 30 s and re-subscribe; candles are re-fetched after every reconnect to backfill the gap.
@@ -54,4 +66,4 @@ SMTP_TEST_HOST=… SMTP_TEST_PORT=587 SMTP_TEST_USER=… SMTP_TEST_PASSWORD=… 
 WHATSAPP_PHONE_NUMBER_ID=… WHATSAPP_TOKEN=… WHATSAPP_WABA_ID=… npm run test:live
 ```
 
-Credentialed tests are skipped (and reported as skipped) when their variables are missing.
+Credentialed tests are skipped (and reported as skipped) when their variables are missing. The MetaTrader 5 live tests (`test-live/mt5.test.ts`) run only on Windows with `MT5_LOGIN`, `MT5_PASSWORD` and `MT5_SERVER` set for a **demo** account. They send demo orders only with `TRADEPILOT_MT5_ORDER_TEST=1`. See [MT5.md](MT5.md).

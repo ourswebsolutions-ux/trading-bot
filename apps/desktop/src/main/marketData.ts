@@ -4,10 +4,11 @@ import { DeltaRest, TickerSchema, type DeltaTicker } from './delta/rest.js'
 import { DELTA_REGIONS, type DeltaRegion } from './delta/regions.js'
 import { DeltaSocket, type SocketState, type SocketTimers, type WebSocketFactory } from './delta/socket.js'
 import type { Candle, CandleGap, CandleSeries, DataState, Instrument, LiveCandle, MarketHealth, MarketSnapshot, Quote, Ticker, Timeframe } from '../shared/ipc.js'
+import { deltaSizingSpec } from '../shared/sizing.js'
 export { MAX_BACKTEST_DAYS as MAX_DAYS } from '../shared/strategySpec.js'
 import { MAX_BACKTEST_DAYS as MAX_DAYS } from '../shared/strategySpec.js'
 
-export const TF_SECONDS: Record<Timeframe, number> = { '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 }
+export const TF_SECONDS: Record<Timeframe, number> = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400 }
 const PAGE_BARS = 2000
 const INSTRUMENTS_TTL_MS = 60 * 60_000
 
@@ -80,6 +81,7 @@ export interface MarketDataDeps {
  * every quote carries its source and freshness so nothing old is ever shown as live.
  */
 export class MarketDataService {
+  readonly broker = 'delta' as const
   private region: DeltaRegion
   private rest: DeltaRest
   private socket: DeltaSocket | null = null
@@ -182,7 +184,10 @@ export class MarketDataService {
             quoteAsset: p.quoting_asset?.symbol ?? null,
             tickSize: p.tick_size,
             contractValue: p.contract_value ?? null,
-            tradingStatus: p.trading_status ?? null
+            tradingStatus: p.trading_status ?? null,
+            // whole contracts; each 1.0 price move is worth the contract value
+            venue: 'delta' as const,
+            ...(p.contract_value ? deltaSizingSpec(p.contract_value) : {})
           }))
           .sort((a, b) => a.symbol.localeCompare(b.symbol))
         this.instrumentsCache = { at: this.now(), list }
@@ -408,6 +413,7 @@ export class MarketDataService {
     const s = this.d.settings()
     const socketOpen = this.socketState === 'open'
     return {
+      broker: 'delta',
       region: this.region,
       regionLabel: DELTA_REGIONS[this.region].label,
       transport: socketOpen ? 'websocket' : this.restError ? 'offline' : 'rest',

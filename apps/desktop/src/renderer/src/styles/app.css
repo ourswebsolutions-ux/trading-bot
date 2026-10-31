@@ -439,3 +439,38 @@ table.data.compact th, table.data.compact td { padding: 6px 8px; font-size: 12.5
 }
 .pay-steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; line-height: 1.55; color: var(--text-2); }
 .pay-steps b, .pay-steps .mono { color: var(--text); }
+
+/* ---------- XAUUSD Gold Scalper ---------- */
+.gold-status { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.gold-status-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); min-width: 0; color: var(--text-2); }
+.gold-status-item > div { flex: 1; min-width: 0; }
+.gold-status-item .gs-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); }
+.gold-status-item .gs-value { color: var(--text); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trend-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.trend-chip { display: grid; gap: 2px; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); font-size: 12.5px; min-width: 110px; }
+.trend-chip.up b { color: var(--up); }
+.trend-chip.down b { color: var(--down); }
+.signal-card { position: relative; overflow: hidden; transition: background 0.3s ease, border-color 0.3s ease; }
+.signal-card.buy { background: var(--up-soft); border-color: var(--up); }
+.signal-card.buy .value { color: var(--up); }
+.signal-card.sell { background: var(--down-soft); border-color: var(--down); }
+.signal-card.sell .value { color: var(--down); }
+.signal-card.blocked { background: var(--warn-soft); }
+.signal-card.blocked .value { color: var(--warn); }
+.gold-controls { display: flex; flex-wrap: wrap; gap: 18px 28px; align-items: center; }
+.gc-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.gc-note { font-size: 12px; color: var(--text-3); max-width: 260px; }
+.buy-btn { border-color: var(--up) !important; color: var(--up) !important; }
+.sell-btn { border-color: var(--down) !important; color: var(--down) !important; }
+.gold-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 500; user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track { width: 40px; height: 22px; border-radius: 11px; background: var(--surface-3); border: 1px solid var(--line); position: relative; transition: background 0.2s ease; }
+.switch .thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--text-2); transition: transform 0.2s ease, background 0.2s ease; }
+.switch input:checked + .track { background: var(--warn-soft); border-color: var(--warn); }
+.switch input:checked + .track .thumb { transform: translateX(18px); background: var(--warn); }
+.switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
+.switch input:disabled + .track { opacity: 0.5; }
+.check-list { display: grid; gap: 6px; }
+@media (max-width: 1280px) { .gold-status, .gold-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (prefers-reduced-motion: reduce) { .switch .track, .switch .thumb, .signal-card { transition: none; } }

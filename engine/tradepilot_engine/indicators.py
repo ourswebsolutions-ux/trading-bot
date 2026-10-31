@@ -71,3 +71,25 @@ def rolling_max(values: Sequence[float], period: int) -> Series:
 
 def rolling_min(values: Sequence[float], period: int) -> Series:
     return [None if i < period - 1 else min(values[i - period + 1 : i + 1]) for i in range(len(values))]
+
+
+def ema_tail(values: Sequence[Optional[float]], period: int) -> Series:
+    """EMA of a series that starts with None (e.g. MACD's signal line): seeded on the first full window."""
+    out: Series = [None] * len(values)
+    start = next((i for i, v in enumerate(values) if v is not None), None)
+    if start is None:
+        return out
+    tail = ema([float(v) for v in values[start:]], period)  # values after the first number are all numbers
+    out[start:] = tail
+    return out
+
+
+def macd(values: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9) -> "tuple[Series, Series, Series]":
+    """MACD line (EMA fast - EMA slow), its signal line (EMA of the line) and the histogram."""
+    if not 1 <= fast < slow:
+        raise ValueError("MACD needs fast < slow")
+    ef, es = ema(values, fast), ema(values, slow)
+    line: Series = [None if a is None or b is None else a - b for a, b in zip(ef, es)]
+    sig = ema_tail(line, signal)
+    hist: Series = [None if a is None or b is None else a - b for a, b in zip(line, sig)]
+    return line, sig, hist

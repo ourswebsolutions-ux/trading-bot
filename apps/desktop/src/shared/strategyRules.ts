@@ -3,11 +3,11 @@
  * validation in the builder) and the main process (authoritative checks before enabling).
  * The Python engine evaluates the same structure (engine/tradepilot_engine/rules.py).
  */
-import type { Timeframe } from './ipc'
+import type { BrokerId, Timeframe } from './ipc'
 
-export const TIMEFRAMES: Timeframe[] = ['5m', '15m', '1h', '4h', '1d']
+export const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
 
-export type IndicatorKind = 'sma' | 'ema' | 'rsi' | 'atr' | 'highest_high' | 'lowest_low' | 'bb_upper' | 'bb_middle' | 'bb_lower'
+export type IndicatorKind = 'sma' | 'ema' | 'rsi' | 'atr' | 'highest_high' | 'lowest_low' | 'bb_upper' | 'bb_middle' | 'bb_lower' | 'macd_line' | 'macd_signal' | 'macd_hist' | 'vwap'
 
 export interface IndicatorSpec {
   label: string
@@ -15,9 +15,12 @@ export interface IndicatorSpec {
   explain: (i: IndicatorDef) => string
   period: [number, number, number]
   stdDev?: [number, number, number]
+  /** MACD: slow EMA and signal periods (`period` is the fast EMA). */
+  slow?: [number, number, number]
+  signal?: [number, number, number]
   /** Fixed value range (e.g. RSI 0–100), used to reject impossible comparisons. */
   range?: [number, number]
-  scale: 'price' | 'oscillator' | 'volatility'
+  scale: 'price' | 'oscillator' | 'volatility' | 'momentum'
 }
 
 export const INDICATORS: Record<IndicatorKind, IndicatorSpec> = {
@@ -29,7 +32,11 @@ export const INDICATORS: Record<IndicatorKind, IndicatorSpec> = {
   lowest_low: { label: 'Lowest low (previous N)', explain: (i) => `lowest low of the previous ${i.period} candles`, period: [2, 400, 20], scale: 'price' },
   bb_upper: { label: 'Bollinger upper band', explain: (i) => `upper Bollinger band (${i.period}, ${i.stdDev ?? 2}σ)`, period: [5, 200, 20], stdDev: [0.5, 4, 2], scale: 'price' },
   bb_middle: { label: 'Bollinger middle band', explain: (i) => `middle Bollinger band (${i.period}-candle SMA)`, period: [5, 200, 20], scale: 'price' },
-  bb_lower: { label: 'Bollinger lower band', explain: (i) => `lower Bollinger band (${i.period}, ${i.stdDev ?? 2}σ)`, period: [5, 200, 20], stdDev: [0.5, 4, 2], scale: 'price' }
+  bb_lower: { label: 'Bollinger lower band', explain: (i) => `lower Bollinger band (${i.period}, ${i.stdDev ?? 2}σ)`, period: [5, 200, 20], stdDev: [0.5, 4, 2], scale: 'price' },
+  macd_line: { label: 'MACD line', explain: (i) => `MACD line (${macdParams(i)})`, period: [2, 100, 12], slow: [3, 200, 26], signal: [2, 50, 9], scale: 'momentum' },
+  macd_signal: { label: 'MACD signal line', explain: (i) => `MACD signal line (${macdParams(i)})`, period: [2, 100, 12], slow: [3, 200, 26], signal: [2, 50, 9], scale: 'momentum' },
+  macd_hist: { label: 'MACD histogram', explain: (i) => `MACD histogram (${macdParams(i)}; above 0 = rising momentum)`, period: [2, 100, 12], slow: [3, 200, 26], signal: [2, 50, 9], scale: 'momentum' },
+  vwap: { label: 'VWAP (daily)', explain: () => 'volume-weighted average price since 00:00 UTC (MetaTrader 5: weighted by tick volume)', period: [1, 1, 1], scale: 'price' }
 }
 
 export interface IndicatorDef {
@@ -37,6 +44,32 @@ export interface IndicatorDef {
   kind: IndicatorKind
   period: number
   stdDev?: number
+  /** MACD only (defaults 26 and 9). */
+  slow?: number
+  signal?: number
+  /** Computed on this higher timeframe (built from the strategy's candles; completed candles only). */
+  timeframe?: Timeframe
+}
+
+function macdParams(i: IndicatorDef): string {
+  return `${i.period}, ${i.slow ?? 26}, ${i.signal ?? 9}`
+}
+
+/** Optional entry filters: no new trade when the spread is too wide or outside the session. */
+export interface EntryFilters {
+  /** Largest bid/ask spread allowed for an entry, in price units (e.g. 0.40 = 40 cents on XAUUSD). */
+  maxSpread?: number | null
+  /** UTC trading window "HH:MM"–"HH:MM" (may wrap past midnight). */
+  session?: { start: string; end: string } | null
+  /** No entry when the close is more than this many ATR(14) away from EMA 20 (an extended move). */
+  maxExtensionAtr?: number | null
+  /** No entry after a candle whose range exceeds this many ATR(14) (a news spike). */
+  abnormalRangeAtr?: number | null
+  /** No entry while ATR(14) is outside this band (price units). */
+  minAtr?: number | null
+  maxAtr?: number | null
+  /** High-risk periods you configure (e.g. scheduled economic releases), UTC ISO times: no new entries. */
+  events?: { start: string; end: string; label: string }[] | null
 }
 
 export type PriceField = 'open' | 'high' | 'low' | 'close'
@@ -58,11 +91,12 @@ export interface RuleGroup {
 
 export type Direction = 'long' | 'short' | 'both'
 export interface StopLoss {
-  type: 'percent' | 'points' | 'atr'
+  /** 'pips' is MetaTrader 5 only (forex): the pip size comes from the broker's symbol. */
+  type: 'percent' | 'points' | 'atr' | 'pips'
   value: number
 }
 export interface TakeProfit {
-  type: 'percent' | 'points' | 'risk_multiple'
+  type: 'percent' | 'points' | 'risk_multiple' | 'pips'
   value: number
 }
 export interface Sizing {
@@ -85,10 +119,18 @@ export interface StrategyRiskV2 {
   allocatedCapitalUsd?: number | null
   /** Cost assumption for backtests, not a trading rule. */
   feeBps: number
+  /** No new entries for the rest of the UTC day after this many losing trades in a row. */
+  maxConsecutiveLosses?: number | null
+  /** Candles to wait after a trade closes before a new entry. */
+  cooldownBars?: number | null
+  /** Close a position after it has been open this many candles. */
+  maxTradeBars?: number | null
 }
 
 export interface StrategyDefinition {
   version: 2
+  /** Trading venue; missing means Delta Exchange (all strategies created before MT5 support). */
+  venue?: BrokerId
   name: string
   description: string
   symbol: string
@@ -98,21 +140,60 @@ export interface StrategyDefinition {
   entry: { long: RuleGroup | null; short: RuleGroup | null }
   exit: { long: RuleGroup | null; short: RuleGroup | null }
   risk: StrategyRiskV2
+  /** Entry filters (missing = none; all strategies created before them). */
+  filters?: EntryFilters | null
 }
 
 export const LIMITS = {
-  stopLoss: { percent: [0.05, 50], points: [0.00000001, 1e9], atr: [0.1, 20] } as Record<StopLoss['type'], [number, number]>,
-  takeProfit: { percent: [0.05, 500], points: [0.00000001, 1e9], risk_multiple: [0.1, 20] } as Record<TakeProfit['type'], [number, number]>,
+  stopLoss: { percent: [0.05, 50], points: [0.00000001, 1e9], atr: [0.1, 20], pips: [0.1, 10000] } as Record<StopLoss['type'], [number, number]>,
+  takeProfit: { percent: [0.05, 500], points: [0.00000001, 1e9], risk_multiple: [0.1, 20], pips: [0.1, 100000] } as Record<TakeProfit['type'], [number, number]>,
   sizing: { percent_equity: [0.1, 100], risk_percent: [0.01, 10], fixed_quantity: [0.00000001, 1e7] } as Record<Sizing['type'], [number, number]>,
   maxDailyLossPct: [0.1, 50] as [number, number],
   maxDailyLossUsd: [1, 1e7] as [number, number],
   allocatedCapitalUsd: [10, 1e8] as [number, number],
   maxTradesPerDay: [1, 100] as [number, number],
   feeBps: [0, 100] as [number, number],
+  maxSpread: [0.00000001, 1e6] as [number, number],
   indicators: 12,
   conditionsPerGroup: 10
 }
 export const ATR_PERIOD_FOR_STOPS = 14
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
+
+const FX_CURRENCIES = new Set(['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'SEK', 'NOK', 'DKK', 'SGD', 'HKD', 'ZAR', 'MXN', 'TRY', 'PLN', 'CNH', 'HUF', 'CZK', 'ILS', 'THB'])
+
+/** Metals, indices and other CFDs: symbols whose "pip" is not a forex pip (XAUUSD, GOLD, US30…). */
+export function isMetalOrCfd(symbol: string): boolean {
+  const s = symbol.toUpperCase()
+  return !(FX_CURRENCIES.has(s.slice(0, 3)) && FX_CURRENCIES.has(s.slice(3, 6)))
+}
+
+export function describeFilters(f: EntryFilters | null | undefined): string[] {
+  const out: string[] = []
+  if (!f) return out
+  if (isNum(f.maxSpread)) out.push(`No new trade while the bid/ask spread is wider than ${f.maxSpread} (price units).`)
+  if (f.session) out.push(`New trades only between ${f.session.start} and ${f.session.end} UTC.`)
+  if (isNum(f.maxExtensionAtr)) out.push(`No entry after an extended move: the close more than ${f.maxExtensionAtr} × ATR(14) away from EMA 20.`)
+  if (isNum(f.abnormalRangeAtr)) out.push(`No entry after an abnormal candle (range above ${f.abnormalRangeAtr} × ATR).`)
+  if (isNum(f.minAtr) || isNum(f.maxAtr)) out.push(`No entry while ATR(14) is ${isNum(f.minAtr) ? `below ${f.minAtr}` : ''}${isNum(f.minAtr) && isNum(f.maxAtr) ? ' or ' : ''}${isNum(f.maxAtr) ? `above ${f.maxAtr}` : ''}.`)
+  if (f.events?.length) out.push(`No entry during ${f.events.length} configured high-risk event window${f.events.length === 1 ? '' : 's'}.`)
+  return out
+}
+
+/** Higher-timeframe seconds (strategy and indicator timeframes). */
+const TF_SEC: Record<Timeframe, number> = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400 }
+
+/** Closed candles the engine needs for this strategy's indicators to warm up (EMAs settle after ~3× their period). */
+export function requiredBars(d: Pick<StrategyDefinition, 'timeframe' | 'indicators'>): number {
+  const base = d.timeframe ? TF_SEC[d.timeframe] : 60
+  let need = 320
+  for (const i of d.indicators ?? []) {
+    const mult = i.timeframe ? Math.max(1, Math.round(TF_SEC[i.timeframe] / base)) : 1
+    const len = i.kind.startsWith('macd') ? (i.slow ?? 26) + (i.signal ?? 9) : i.period
+    need = Math.max(need, (len * 3 + 10) * mult)
+  }
+  return Math.min(need, 6000)
+}
 
 export interface Issue {
   path: string
@@ -124,9 +205,10 @@ export interface ValidationResult {
   warnings: Issue[]
 }
 
-export function emptyDefinition(symbol = 'BTCUSD'): StrategyDefinition {
+export function emptyDefinition(symbol = 'BTCUSD', venue: BrokerId = 'delta'): StrategyDefinition {
   return {
     version: 2,
+    ...(venue === 'mt5' ? { venue } : {}),
     name: '',
     description: '',
     symbol,
@@ -135,7 +217,8 @@ export function emptyDefinition(symbol = 'BTCUSD'): StrategyDefinition {
     indicators: [],
     entry: { long: { match: 'all', conditions: [] }, short: null },
     exit: { long: null, short: null },
-    risk: { stopLoss: null, takeProfit: null, sizing: null, maxDailyLossPct: null, maxDailyLossUsd: null, maxTradesPerDay: null, allocatedCapitalUsd: null, feeBps: 5 }
+    // MT5 costs are mostly the spread (taken from the candle data), so no extra fee by default
+    risk: { stopLoss: null, takeProfit: null, sizing: null, maxDailyLossPct: null, maxDailyLossUsd: null, maxTradesPerDay: null, allocatedCapitalUsd: null, feeBps: venue === 'mt5' ? 0 : 5 }
   }
 }
 
@@ -190,9 +273,15 @@ function contradictoryBounds(conditions: Condition[]): string | null {
 }
 
 export interface ValidationContext {
-  /** Instruments listed in the user's region; null when the list could not be loaded. */
+  /** Instruments listed for the strategy's venue (Delta region / MT5 broker); null when the list could not be loaded. */
   instruments: string[] | null
 }
+
+/** The venue a definition trades on (missing = Delta Exchange, for backward compatibility). */
+export const venueOf = (d: Pick<StrategyDefinition, 'venue'> | null | undefined): BrokerId => (d?.venue === 'mt5' ? 'mt5' : 'delta')
+
+/** Symbol syntax per venue: Delta tickers, or broker-specific MT5 names with suffixes (EURUSD.m, XAUUSD#). */
+export const SYMBOL_PATTERN: Record<BrokerId, RegExp> = { delta: /^[A-Z0-9_]{2,32}$/, mt5: /^[A-Za-z0-9._#+!-]{1,32}$/ }
 
 /**
  * Structural and semantic validation. Errors block enabling; warnings are shown but allowed.
@@ -209,9 +298,14 @@ export function validateDefinition(d: StrategyDefinition, ctx: ValidationContext
   if (!name || name.length > 80) err('name', 'Name is required (up to 80 characters).')
   if ((d.description ?? '').length > 2000) err('description', 'Description must be 2000 characters or fewer.')
 
-  if (!/^[A-Z0-9_]{2,32}$/.test(d.symbol ?? '')) err('symbol', 'Choose an instrument.')
-  else if (ctx.instruments === null) err('symbol', 'The instrument list could not be loaded, so this instrument cannot be verified right now. Check the market data connection.')
-  else if (!ctx.instruments.includes(d.symbol)) err('symbol', `${d.symbol} is not a live perpetual contract in your Delta Exchange region.`)
+  const venue = venueOf(d)
+  if (d.venue !== undefined && d.venue !== 'delta' && d.venue !== 'mt5') err('venue', 'Choose Delta Exchange or MetaTrader 5.')
+  if (!SYMBOL_PATTERN[venue].test(d.symbol ?? '')) err('symbol', 'Choose an instrument.')
+  else if (ctx.instruments === null) err('symbol', venue === 'mt5' ? 'The MetaTrader 5 symbol list could not be loaded, so this symbol cannot be verified right now. Check that the MT5 terminal is running and connected (Settings → MetaTrader 5).' : 'The instrument list could not be loaded, so this instrument cannot be verified right now. Check the market data connection.')
+  else if (!ctx.instruments.includes(d.symbol)) err('symbol', venue === 'mt5' ? `${d.symbol} is not offered by your MetaTrader 5 broker. Symbol names are broker-specific (for example EURUSD, EURUSD.m or EURUSD#).` : `${d.symbol} is not a live perpetual contract in your Delta Exchange region.`)
+  if (venue === 'delta' && (d.risk?.stopLoss?.type === 'pips' || d.risk?.takeProfit?.type === 'pips')) {
+    err(d.risk?.stopLoss?.type === 'pips' ? 'risk.stopLoss.type' : 'risk.takeProfit.type', 'Pips apply to MetaTrader 5 forex symbols only. On Delta Exchange use a percent, price points or ATR.')
+  }
 
   if (!d.timeframe) err('timeframe', 'Choose a timeframe.')
   else if (!TIMEFRAMES.includes(d.timeframe)) err('timeframe', `Timeframe ${d.timeframe} is not supported. Use ${TIMEFRAMES.join(', ')}.`)
@@ -231,6 +325,18 @@ export function validateDefinition(d: StrategyDefinition, ctx: ValidationContext
       ids.add(ind.id)
       if (!inRange(ind.period, [spec.period[0], spec.period[1]]) || !Number.isInteger(ind.period)) err(`${p}.period`, `${spec.label} period must be a whole number from ${spec.period[0]} to ${spec.period[1]}.`)
       if (spec.stdDev && !inRange(ind.stdDev, [spec.stdDev[0], spec.stdDev[1]])) err(`${p}.stdDev`, `Band width must be ${spec.stdDev[0]}–${spec.stdDev[1]} standard deviations.`)
+      if (ind.timeframe !== undefined && ind.timeframe !== null) {
+        const tfs = TF_SEC[ind.timeframe]
+        const base = d.timeframe ? TF_SEC[d.timeframe] : undefined
+        if (!tfs || ind.kind === 'vwap') err(`${p}.timeframe`, 'This indicator cannot use another timeframe.')
+        else if (base && (tfs <= base || tfs % base !== 0)) err(`${p}.timeframe`, `A ${ind.timeframe} indicator needs a lower strategy timeframe that divides it (for example 1m or 5m for 15m).`)
+      }
+      if (spec.slow && spec.signal) {
+        const slow = ind.slow ?? spec.slow[2]
+        const signal = ind.signal ?? spec.signal[2]
+        if (!Number.isInteger(slow) || !inRange(slow, [spec.slow[0], spec.slow[1]]) || slow <= ind.period) err(`${p}.slow`, `MACD slow period must be a whole number from ${spec.slow[0]} to ${spec.slow[1]}, above the fast period.`)
+        if (!Number.isInteger(signal) || !inRange(signal, [spec.signal[0], spec.signal[1]])) err(`${p}.signal`, `MACD signal period must be a whole number from ${spec.signal[0]} to ${spec.signal[1]}.`)
+      }
     })
   }
 
@@ -327,6 +433,38 @@ export function validateDefinition(d: StrategyDefinition, ctx: ValidationContext
     if (r.stopLoss?.type === 'atr' && !d.indicators.some((i) => i.kind === 'atr')) {
       warn('risk.stopLoss.type', `ATR stops use a ${ATR_PERIOD_FOR_STOPS}-candle ATR computed automatically.`)
     }
+    for (const [k, lo, hi, text] of [['maxConsecutiveLosses', 1, 50, 'Losses in a row'], ['cooldownBars', 0, 1000, 'Cooldown'], ['maxTradeBars', 1, 100000, 'Maximum trade duration']] as const) {
+      const v = r[k]
+      if (v !== null && v !== undefined && (!Number.isInteger(v) || v < lo || v > hi)) err(`risk.${k}`, `${text} must be a whole number from ${lo} to ${hi}.`)
+    }
+    if (venue === 'mt5' && (r.stopLoss?.type === 'pips' || r.takeProfit?.type === 'pips') && isMetalOrCfd(d.symbol)) {
+      warn(r.stopLoss?.type === 'pips' ? 'risk.stopLoss.type' : 'risk.takeProfit.type', `What a "pip" means for ${d.symbol} differs between brokers. Use a price distance (points) or ATR instead.`)
+    }
+  }
+  // ---- entry filters ----
+  const f = d.filters
+  if (f !== null && f !== undefined) {
+    if (typeof f !== 'object') err('filters', 'Entry filters are malformed.')
+    else {
+      if (f.maxSpread !== null && f.maxSpread !== undefined && !inRange(f.maxSpread, LIMITS.maxSpread)) err('filters.maxSpread', `Maximum spread must be a price distance from ${LIMITS.maxSpread[0]} to ${LIMITS.maxSpread[1]}.`)
+      if (f.session) {
+        if (!HHMM.test(f.session.start ?? '') || !HHMM.test(f.session.end ?? '')) err('filters.session', 'Session times must be HH:MM (UTC), for example 07:00 and 20:00.')
+        else if (f.session.start === f.session.end) err('filters.session', 'The session start and end must differ.')
+      }
+      for (const k of ['maxExtensionAtr', 'abnormalRangeAtr', 'minAtr', 'maxAtr'] as const) {
+        const v = f[k]
+        if (v !== null && v !== undefined && !(isNum(v) && v > 0 && v <= 1e6)) err(`filters.${k}`, 'Enter a positive number.')
+      }
+      if (isNum(f.minAtr) && isNum(f.maxAtr) && f.minAtr >= f.maxAtr) err('filters.maxAtr', 'The maximum ATR must be above the minimum.')
+      if (f.events) {
+        if (!Array.isArray(f.events) || f.events.length > 200) err('filters.events', 'At most 200 high-risk events.')
+        else f.events.forEach((e, i) => {
+          const a = Date.parse(e?.start ?? '')
+          const b = Date.parse(e?.end ?? '')
+          if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b) err(`filters.events.${i}`, 'Each high-risk event needs a start before its end (UTC).')
+        })
+      }
+    }
   }
   return { valid: errors.length === 0, errors, warnings }
 }
@@ -336,7 +474,7 @@ function operandText(o: Operand, d: StrategyDefinition): string {
   if (o.type === 'price') return `the ${o.field} price`
   if (o.type === 'value') return String(o.value)
   const ind = d.indicators.find((i) => i.id === o.id)
-  return ind ? `the ${INDICATORS[ind.kind].explain(ind)}` : `"${o.id}" (undefined)`
+  return ind ? `the ${INDICATORS[ind.kind].explain(ind)}${ind.timeframe ? ` on ${ind.timeframe} candles` : ''}` : `"${o.id}" (undefined)`
 }
 
 export function describeGroup(g: RuleGroup | null, d: StrategyDefinition): string {
@@ -347,33 +485,38 @@ export function describeGroup(g: RuleGroup | null, d: StrategyDefinition): strin
 
 export function describeStop(s: StopLoss | null): string {
   if (!s) return 'not set'
+  if (s.type === 'pips') return `${s.value} pips from the entry price`
   return s.type === 'percent' ? `${s.value}% from the entry price` : s.type === 'points' ? `${s.value} price units from the entry price` : `${s.value} × ATR(${ATR_PERIOD_FOR_STOPS}) from the entry price`
 }
 
 export function describeTarget(t: TakeProfit | null): string {
   if (!t) return 'none'
+  if (t.type === 'pips') return `${t.value} pips from the entry price`
   return t.type === 'percent' ? `${t.value}% from the entry price` : t.type === 'points' ? `${t.value} price units from the entry price` : `${t.value} × the stop-loss distance`
 }
 
-export function describeSizing(s: Sizing | null): string {
+export function describeSizing(s: Sizing | null, venue: BrokerId = 'delta'): string {
   if (!s) return 'not set'
+  if (s.type === 'fixed_quantity' && venue === 'mt5') return `${s.value} lots per trade`
   return s.type === 'percent_equity' ? `${s.value}% of equity per trade` : s.type === 'risk_percent' ? `sized so a stop-out loses ${s.value}% of equity` : `${s.value} units per trade`
 }
 
 const usd = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+/** MT5 amounts are in the account currency (USD, EUR, …); Delta limits are USD. */
+const amount = (n: number, venue: BrokerId) => (venue === 'mt5' ? `${n.toLocaleString('en-US', { maximumFractionDigits: 2 })} (account currency)` : usd(n))
 
 /** Sizing text that names the capital base actually used. */
-export function describeSizingFor(r: StrategyRiskV2): string {
+export function describeSizingFor(r: StrategyRiskV2, venue: BrokerId = 'delta'): string {
   const s = r.sizing
-  if (!s || s.type === 'fixed_quantity' || !isNum(r.allocatedCapitalUsd)) return describeSizing(s)
-  const base = `the ${usd(r.allocatedCapitalUsd)} allocated capital (or the account equity, if lower)`
+  if (!s || s.type === 'fixed_quantity' || !isNum(r.allocatedCapitalUsd)) return describeSizing(s, venue)
+  const base = `the ${amount(r.allocatedCapitalUsd, venue)} allocated capital (or the account equity, if lower)`
   return s.type === 'percent_equity' ? `${s.value}% of ${base} per trade` : `sized so a stop-out loses ${s.value}% of ${base}`
 }
 
-export function describeDailyLoss(r: StrategyRiskV2): string {
+export function describeDailyLoss(r: StrategyRiskV2, venue: BrokerId = 'delta'): string {
   const parts: string[] = []
   if (isNum(r.maxDailyLossPct)) parts.push(`${r.maxDailyLossPct}% of equity`)
-  if (isNum(r.maxDailyLossUsd)) parts.push(usd(r.maxDailyLossUsd))
+  if (isNum(r.maxDailyLossUsd)) parts.push(amount(r.maxDailyLossUsd, venue))
   return parts.length ? parts.join(' or ') + (parts.length > 1 ? ' (whichever is reached first)' : '') : 'not set'
 }
 
@@ -390,18 +533,33 @@ export function explainDefinition(d: StrategyDefinition): StrategyExplanation {
   const tf = d.timeframe ?? '?'
   if (d.entry.long?.conditions.length) entry.push(`Buy (go long) ${d.symbol} when ${describeGroup(d.entry.long, d)}.`)
   if (d.entry.short?.conditions.length) entry.push(`Sell short ${d.symbol} when ${describeGroup(d.entry.short, d)}.`)
+  if (entry.length) entry.push(...describeFilters(d.filters))
   if (entry.length) entry.push(`Conditions are checked when each ${tf} candle closes. In automation a market order is sent right after the close; backtests fill at the next candle's open. Only one position is open at a time.`)
   else entry.push('No entry rules yet, so the strategy would never open a position.')
   if (d.exit.long?.conditions.length) exit.push(`Close a long position when ${describeGroup(d.exit.long, d)}.`)
   if (d.exit.short?.conditions.length) exit.push(`Close a short position when ${describeGroup(d.exit.short, d)}.`)
   exit.push(`Stop-loss: ${describeStop(d.risk.stopLoss)}.`)
   exit.push(`Take-profit: ${describeTarget(d.risk.takeProfit)}.`)
-  exit.push('In live automation the stop-loss and take-profit are placed on the exchange with the entry order. Backtests check them against each candle’s high and low; if both are touched in the same candle the stop is assumed to fill first.')
+  const venue = venueOf(d)
+  exit.push(
+    venue === 'mt5'
+      ? 'In live automation the stop-loss and take-profit are attached to the position at your MetaTrader 5 broker with the entry order. Backtests check them against each candle’s high and low; if both are touched in the same candle the stop is assumed to fill first.'
+      : 'In live automation the stop-loss and take-profit are placed on the exchange with the entry order. Backtests check them against each candle’s high and low; if both are touched in the same candle the stop is assumed to fill first.'
+  )
+  if (venue === 'mt5' && (d.risk.stopLoss?.type === 'pips' || d.risk.takeProfit?.type === 'pips')) {
+    exit.push('A pip is the broker\'s pip size for the symbol: 0.0001 on most forex pairs, 0.01 on JPY pairs (10 points on 3- and 5-digit quotes).')
+  }
   const risk = [
-    `Position size: ${describeSizingFor(d.risk)}.`,
-    ...(isNum(d.risk.allocatedCapitalUsd) ? [`Allocated capital: ${usd(d.risk.allocatedCapitalUsd)}. This only sets the base for position sizing; it does not reserve or move funds on the exchange.`] : []),
-    `Daily limits: maximum realized loss ${describeDailyLoss(d.risk)}; ${d.risk.maxTradesPerDay != null ? `at most ${d.risk.maxTradesPerDay} trades` : 'trade limit not set'} per UTC day. After either limit, no new trades open until the next day.`,
-    `Backtest fee assumption: ${d.risk.feeBps} basis points per side.`
+    `Position size: ${describeSizingFor(d.risk, venue)}${venue === 'mt5' && d.risk.sizing?.type !== 'fixed_quantity' ? ', rounded down to the broker\'s lot step' : ''}.`,
+    ...(isNum(d.risk.allocatedCapitalUsd) ? [`Allocated capital: ${amount(d.risk.allocatedCapitalUsd, venue)}. This only sets the base for position sizing; it does not reserve or move funds on the exchange.`] : []),
+    `Daily limits: maximum realized loss ${describeDailyLoss(d.risk, venue)}; ${d.risk.maxTradesPerDay != null ? `at most ${d.risk.maxTradesPerDay} trades` : 'trade limit not set'} per UTC day. After either limit, no new trades open until the next day.`,
+    ...(isNum(d.risk.maxConsecutiveLosses) ? [`After ${d.risk.maxConsecutiveLosses} losing trades in a row, no new trades until the next UTC day.`] : []),
+    ...(isNum(d.risk.cooldownBars) && d.risk.cooldownBars > 0 ? [`After each trade, wait ${d.risk.cooldownBars} candle${d.risk.cooldownBars === 1 ? '' : 's'} before a new entry.`] : []),
+    ...(isNum(d.risk.maxTradeBars) ? [`A position open for ${d.risk.maxTradeBars} candles is closed at market (maximum trade duration).`] : []),
+    venue === 'mt5'
+      ? `Backtest cost assumption: ${d.risk.feeBps} basis points per side plus the broker's spread from the candle data (buys fill at the ask).`
+      : `Backtest fee assumption: ${d.risk.feeBps} basis points per side.`,
+    ...(venue === 'mt5' ? ['Forex and CFD markets close on weekends and between sessions: no orders are sent while a market is closed, and the broker may fill at a different price after a gap.'] : [])
   ]
   return { entry, exit, risk }
 }
@@ -490,6 +648,7 @@ export function diffDefinitions(a: StrategyDefinition, b: StrategyDefinition): D
   const add = (field: string, before: string, after: string) => {
     if (before !== after) out.push({ field, before: before || '—', after: after || '—' })
   }
+  add('Broker', venueOf(a) === 'mt5' ? 'MetaTrader 5' : 'Delta Exchange', venueOf(b) === 'mt5' ? 'MetaTrader 5' : 'Delta Exchange')
   add('Name', a.name, b.name)
   add('Description', a.description, b.description)
   add('Instrument', a.symbol, b.symbol)
@@ -501,10 +660,11 @@ export function diffDefinitions(a: StrategyDefinition, b: StrategyDefinition): D
   add('Short exit rules', describeGroup(a.exit.short, a), describeGroup(b.exit.short, b))
   add('Stop-loss', describeStop(a.risk.stopLoss), describeStop(b.risk.stopLoss))
   add('Take-profit', describeTarget(a.risk.takeProfit), describeTarget(b.risk.takeProfit))
-  add('Position size', describeSizingFor(a.risk), describeSizingFor(b.risk))
+  add('Position size', describeSizingFor(a.risk, venueOf(a)), describeSizingFor(b.risk, venueOf(b)))
   add('Allocated capital', isNum(a.risk.allocatedCapitalUsd) ? usd(a.risk.allocatedCapitalUsd) : 'not set', isNum(b.risk.allocatedCapitalUsd) ? usd(b.risk.allocatedCapitalUsd) : 'not set')
   add('Daily loss limit', describeDailyLoss(a.risk), describeDailyLoss(b.risk))
   add('Trades per day', String(a.risk.maxTradesPerDay ?? 'not set'), String(b.risk.maxTradesPerDay ?? 'not set'))
   add('Backtest fee assumption', `${a.risk.feeBps} bps`, `${b.risk.feeBps} bps`)
+  add('Entry filters', describeFilters(a.filters).join(' ') || 'none', describeFilters(b.filters).join(' ') || 'none')
   return out
 }

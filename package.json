@@ -1,7 +1,7 @@
 {
   "name": "tradepilot",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TradePilot desktop trading automation platform",
   "workspaces": [
     "packages/shared",
@@ -20,7 +20,7 @@
     "package:desktop": "npm run package -w @tradepilot/desktop",
     "test:e2e": "npm run build -w @tradepilot/desktop && tsx apps/desktop/e2e/smoke.ts",
     "test:live": "npm run test:live -w @tradepilot/desktop",
-    "lint": "npm run typecheck && python3 -m compileall -q engine/tradepilot_engine engine/run_engine.py",
+    "lint": "npm run typecheck && python3 -m compileall -q engine/tradepilot_engine engine/tradepilot_mt5 engine/run_engine.py engine/run_mt5_bridge.py",
     "build:engine": "node scripts/build-engine.mjs",
     "test:packaged": "tsx apps/desktop/e2e/packaged.ts"
   },

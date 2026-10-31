@@ -13,10 +13,12 @@ response can bypass these checks.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from . import indicators as ind
 from .backtest import _candles
-from .rules import ATR_PERIOD_FOR_STOPS, Evaluator, RuleError, atr, check_definition, daily_loss_reached, sizing_base
+from .rules import ATR_PERIOD_FOR_STOPS, EXTENSION_EMA, Evaluator, RuleError, atr, bar_seconds, check_definition, daily_loss_reached, filter_block, market_block, needs_market_filters, sizing_base
 
 RISK_KEYS = ("maxExposurePct", "maxOpenPositions", "accountMaxDailyLossPct", "maxOrderNotionalUsd")
 
@@ -48,14 +50,19 @@ def round_to_tick(price: float, tick: float, mode: str = "nearest") -> float:
     return round(steps * tick, decimals + 2)
 
 
-def protective_levels(definition: Dict[str, Any], side: int, entry_price: float, candles: List[Dict[str, Any]], tick: float) -> Dict[str, Optional[float]]:
+def protective_levels(definition: Dict[str, Any], side: int, entry_price: float, candles: List[Dict[str, Any]], tick: float, pip_size: Optional[float] = None) -> Dict[str, Optional[float]]:
     """Stop-loss / take-profit prices for a position, from the strategy's risk rules."""
     risk = definition["risk"]
     stop = risk["stopLoss"]
+    if stop["type"] in ("pips",) or (risk.get("takeProfit") or {}).get("type") == "pips":
+        if not _num(pip_size) or pip_size <= 0:
+            raise LiveError("pip size is unknown for this symbol; pips stops need a MetaTrader 5 forex symbol")
     if stop["type"] == "percent":
         dist = entry_price * stop["value"] / 100
     elif stop["type"] == "points":
         dist = float(stop["value"])
+    elif stop["type"] == "pips":
+        dist = float(stop["value"]) * float(pip_size)
     else:
         c = _candles(candles)
         a = atr(c["high"], c["low"], c["close"], ATR_PERIOD_FOR_STOPS)[-1]
@@ -69,26 +76,90 @@ def protective_levels(definition: Dict[str, Any], side: int, entry_price: float,
     take_price = None
     tp = risk.get("takeProfit")
     if tp:
-        tdist = entry_price * tp["value"] / 100 if tp["type"] == "percent" else float(tp["value"]) if tp["type"] == "points" else dist * tp["value"]
+        tdist = entry_price * tp["value"] / 100 if tp["type"] == "percent" else float(tp["value"]) if tp["type"] == "points" else float(tp["value"]) * float(pip_size) if tp["type"] == "pips" else dist * tp["value"]
         take_price = round_to_tick(entry_price + side * tdist, tick, "nearest")
     return {"stopPrice": stop_price, "takePrice": take_price, "stopDistance": dist}
 
 
-def _size_contracts(definition, side, price, stop_dist, equity, contract_value) -> (int, str):
+def sizing_spec(inst: Dict[str, Any]) -> Dict[str, Any]:
+    """Broker-neutral volume spec (mirrors apps/desktop/src/shared/sizing.ts).
+
+    Without explicit fields the instrument is a Delta perpetual: whole contracts, each 1.0 price
+    move worth `contractValue`. Other venues pass valuePerPoint / volumeStep / volumeMin / volumeMax
+    (e.g. fractional lots)."""
+    vpp = inst.get("valuePerPoint")
+    if _num(vpp) and vpp > 0:
+        step = inst.get("volumeStep") if _num(inst.get("volumeStep")) and inst["volumeStep"] > 0 else 1.0
+        return {
+            "valuePerPoint": float(vpp),
+            "unitsPerVolume": float(inst["unitsPerVolume"]) if _num(inst.get("unitsPerVolume")) and inst["unitsPerVolume"] > 0 else float(vpp),
+            "volumeStep": float(step),
+            "volumeMin": float(inst["volumeMin"]) if _num(inst.get("volumeMin")) and inst["volumeMin"] > 0 else float(step),
+            "volumeMax": float(inst["volumeMax"]) if _num(inst.get("volumeMax")) and inst["volumeMax"] > 0 else None,
+            "volumeUnit": str(inst.get("volumeUnit") or "units"),
+        }
+    cv = float(inst.get("contractValue") or 0)
+    return {"valuePerPoint": cv, "unitsPerVolume": cv, "volumeStep": 1.0, "volumeMin": 1.0, "volumeMax": None, "volumeUnit": "contracts"}
+
+
+def _step_decimals(step: float) -> int:
+    if step >= 1 and float(step).is_integer():
+        return 0
+    text = repr(float(step))
+    if "e-" in text:
+        return int(text.split("e-")[1])
+    return min(10, len(text.split(".")[1]) if "." in text else 0)
+
+
+def round_volume_down(volume: float, step: float):
+    """Floors a volume to the step; whole steps stay ints (Delta contracts)."""
+    if not math.isfinite(volume) or volume <= 0:
+        return 0
+    steps = math.floor(volume / step + 1e-9)
+    if step == 1:
+        return int(steps)
+    return round(steps * step, _step_decimals(step))
+
+
+def _is_delta_contracts(spec: Dict[str, Any]) -> bool:
+    return spec["volumeStep"] == 1 and spec["volumeMin"] == 1 and spec["volumeUnit"] == "contracts"
+
+
+def _size_volume(definition, side, price, stop_dist, equity, spec) -> (float, str):
     sizing = definition["risk"]["sizing"]
     equity = sizing_base(definition["risk"], equity)
+    # same operation order as the original whole-contract sizing, so Delta results are bit-identical
     if sizing["type"] == "percent_equity":
         qty = equity * sizing["value"] / 100 / price
+        per_volume = spec["valuePerPoint"]
     elif sizing["type"] == "risk_percent":
         qty = equity * sizing["value"] / 100 / stop_dist
+        per_volume = spec["valuePerPoint"]
     else:
         qty = float(sizing["value"])
+        per_volume = spec["unitsPerVolume"]
     if not math.isfinite(qty) or qty <= 0:
         return 0, "position size computed as zero"
-    contracts = int(math.floor(qty / contract_value + 1e-9))
-    if contracts < 1:
-        return 0, f"position size {qty:.6g} is below one contract ({contract_value})"
-    return contracts, ""
+    raw = qty / per_volume
+    volume = round_volume_down(raw, spec["volumeStep"])
+    if volume < spec["volumeMin"] - 1e-9:
+        if _is_delta_contracts(spec):
+            return 0, f"position size {qty:.6g} is below one contract ({per_volume})"
+        return 0, f"position size {raw:.6g} {spec['volumeUnit']} is below the minimum of {spec['volumeMin']:g} {spec['volumeUnit']}"
+    return volume, ""
+
+
+def _ts(value: Any) -> Optional[float]:
+    """Seconds since 1970 from a number or an ISO-8601 time (as the desktop stores them)."""
+    if _num(value):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+    return None
 
 
 def evaluate_session(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -109,9 +180,9 @@ def evaluate_session(p: Dict[str, Any]) -> Dict[str, Any]:
     session = p.get("session") or {}
     account = p.get("account") or {}
     inst = p.get("instrument") or {}
-    contract_value = float(inst.get("contractValue") or 0)
+    spec = sizing_spec(inst)
     tick = float(inst.get("tickSize") or 0)
-    if contract_value <= 0:
+    if spec["valuePerPoint"] <= 0:
         raise LiveError("instrument contract value is unknown")
     mark = float((p.get("quote") or {}).get("mark") or c["close"][i])
 
@@ -126,10 +197,17 @@ def evaluate_session(p: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"candleTime": candle_time, "signals": signals, "blockedBy": [], "intent": {"action": "none", "reason": "no signal"}}
 
     pos = session.get("position")
+    srisk0 = d.get("risk") or {}
+    step = bar_seconds(c["time"])
     if pos:
         side = 1 if pos["side"] == "long" else -1
         stop = pos.get("stopPrice")
         take = pos.get("takePrice")
+        max_bars = srisk0.get("maxTradeBars")
+        entered = _ts(pos.get("entryTime"))
+        if max_bars and entered is not None and step > 0 and (candle_time + step - entered) / step >= max_bars - 1e-9:
+            out["intent"] = {"action": "close", "reason": "max_duration", "contracts": pos["contracts"]}
+            return out
         # backup protection: if the protective order did not trigger, close on the mark price
         if stop is not None and ((side == 1 and mark <= stop) or (side == -1 and mark >= stop)):
             out["intent"] = {"action": "close", "reason": "stop_loss", "contracts": pos["contracts"]}
@@ -178,32 +256,63 @@ def evaluate_session(p: Dict[str, Any]) -> Dict[str, Any]:
     equity = float(account.get("equity") or 0)
     if equity <= 0:
         blocked.append("account equity is unknown or zero")
+    max_streak = srisk.get("maxConsecutiveLosses")
+    if max_streak is not None and int(session.get("consecutiveLosses") or 0) >= max_streak:
+        blocked.append(f"{int(session.get('consecutiveLosses'))} losing trades in a row today (maximum {int(max_streak)})")
+    cooldown = srisk.get("cooldownBars")
+    last_exit = _ts(session.get("lastExitTime"))
+    if cooldown and last_exit is not None and step > 0:
+        waited = (candle_time + step - last_exit) / step
+        if waited < cooldown:
+            blocked.append(f"cooling down after the last trade ({cooldown - int(waited)} more candle{'s' if cooldown - int(waited) != 1 else ''})")
+    filters = d.get("filters") or None
+    if filters:
+        q0 = p.get("quote") or {}
+        spread = float(q0["ask"]) - float(q0["bid"]) if _num(q0.get("bid")) and _num(q0.get("ask")) else None
+        entry_ts = float(p["now"]) if _num(p.get("now")) else candle_time + bar_seconds(c["time"])
+        why = filter_block(filters, spread, entry_ts)
+        if why:
+            blocked.append(why)
+        if needs_market_filters(filters):
+            ema_ext = ind.ema(c["close"], EXTENSION_EMA) if filters.get("maxExtensionAtr") is not None else None
+            market = market_block(filters, c, i, atr(c["high"], c["low"], c["close"], ATR_PERIOD_FOR_STOPS), ema_ext)
+            if market:
+                blocked.append(market)
     if blocked:
         out["intent"] = {"action": "none", "reason": "blocked by risk controls"}
         return out
 
     try:
-        levels = protective_levels(d, side, mark, raw, tick)
+        # where quoted (MT5), a buy fills at the ask and a sell at the bid: anchor stops there
+        q = p.get("quote") or {}
+        entry_ref = float(q["ask"] if side > 0 else q["bid"]) if _num(q.get("bid")) and _num(q.get("ask")) else mark
+        levels = protective_levels(d, side, entry_ref, raw, tick, inst.get("pipSize"))
     except LiveError as e:
         blocked.append(str(e))
         out["intent"] = {"action": "none", "reason": "blocked by risk controls"}
         return out
-    contracts, why = _size_contracts(d, side, mark, levels["stopDistance"], equity, contract_value)
-    if contracts < 1:
+    contracts, why = _size_volume(d, side, mark, levels["stopDistance"], equity, spec)
+    if not contracts:
         blocked.append(why)
         out["intent"] = {"action": "none", "reason": "blocked by risk controls"}
         return out
     notes: List[str] = []
-    unit_notional = contract_value * mark
-    # hard caps: shrink the order to fit; block it if not even one contract fits
-    cap_order = int(math.floor(risk["maxOrderNotionalUsd"] / unit_notional + 1e-9))
+    unit = spec["volumeUnit"]
+    step = spec["volumeStep"]
+    unit_notional = spec["valuePerPoint"] * mark
+    # hard caps: shrink the order to fit (in whole steps); block it if not even the minimum fits
+    cap_order = round_volume_down(risk["maxOrderNotionalUsd"] / unit_notional, step)
     room = equity * risk["maxExposurePct"] / 100 - float(account.get("openExposureUsd") or 0)
-    cap_exposure = int(math.floor(room / unit_notional + 1e-9)) if room > 0 else 0
-    allowed = min(contracts, cap_order, cap_exposure)
+    cap_exposure = round_volume_down(room / unit_notional, step) if room > 0 else 0
+    caps = [(cap_order, "order notional"), (cap_exposure, "exposure")]
+    if spec["volumeMax"] is not None:
+        caps.append((round_volume_down(spec["volumeMax"], step), "venue maximum"))
+    allowed = min([contracts] + [c for c, _ in caps])
     if allowed < contracts:
-        notes.append(f"size reduced from {contracts} to {allowed} contracts by {'order notional' if cap_order <= cap_exposure else 'exposure'} limit")
-    if allowed < 1:
-        blocked.append("maximum order size or exposure limit leaves no room for one contract")
+        limiter = min(caps, key=lambda c: c[0])[1]
+        notes.append(f"size reduced from {contracts} to {allowed} {unit} by {limiter} limit")
+    if allowed < spec["volumeMin"] - 1e-9 or not allowed:
+        blocked.append("maximum order size or exposure limit leaves no room for one contract" if _is_delta_contracts(spec) else f"maximum order size or exposure limit leaves no room for the minimum of {spec['volumeMin']:g} {unit}")
         out["intent"] = {"action": "none", "reason": "blocked by risk controls"}
         return out
     out["intent"] = {

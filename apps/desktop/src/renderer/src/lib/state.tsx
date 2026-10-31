@@ -3,7 +3,7 @@ import type { AppInfo, AuthStatus, EngineStatus, GeneralPreferences, Subscriptio
 import { call } from './api'
 import { useEvent } from './hooks'
 
-export type Page = 'dashboard' | 'strategies' | 'trading' | 'analytics' | 'notifications' | 'subscription' | 'settings'
+export type Page = 'gold' | 'dashboard' | 'strategies' | 'trading' | 'analytics' | 'notifications' | 'subscription' | 'settings'
 
 interface AppState {
   auth: AuthStatus | null
@@ -39,7 +39,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [engine, setEngine] = useState<EngineStatus | null>(null)
   const [unread, setUnread] = useState(0)
   const [prefs, setPrefs] = useState<GeneralPreferences | null>(null)
-  const [page, setPage] = useState<Page>('dashboard')
+  const [page, setPage] = useState<Page>('gold')
   const [params, setParams] = useState<Record<string, string>>({})
 
   useEffect(() => {

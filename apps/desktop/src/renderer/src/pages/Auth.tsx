@@ -9,14 +9,16 @@ import { duration } from '../lib/format'
 import { useNow } from '../lib/hooks'
 import { useApp } from '../lib/state'
 
-/** Live market view on the sign-in screen: real Delta Exchange candles and price, never sample data. */
+/** Live market view on the sign-in screen: the active broker's real candles and price, never sample data. */
 function LoginMarket() {
   const [symbol, setSymbol] = useState('BTCUSD')
   const snap = useMarketWatch('login', [symbol], { symbol, timeframe: '15m' })
   useEffect(() => {
-    // instruments differ by region (Global lists BTCUSDT)
-    if (snap?.health.unsupported.includes(symbol) && symbol === 'BTCUSD') setSymbol('BTCUSDT')
-  }, [snap?.health.unsupported, symbol])
+    // MetaTrader 5 brokers list forex pairs; instruments differ by Delta region (Global lists BTCUSDT)
+    if (snap?.health.broker === 'mt5' && symbol.startsWith('BTC')) setSymbol('EURUSD')
+    else if (snap?.health.broker === 'delta' && symbol === 'EURUSD') setSymbol('BTCUSD')
+    else if (snap?.health.unsupported.includes(symbol) && symbol === 'BTCUSD') setSymbol('BTCUSDT')
+  }, [snap?.health.unsupported, snap?.health.broker, symbol])
   const live = useLiveSeries(symbol, '15m', 2, snap?.health.connectionEpoch)
   const quote = snap?.quotes[symbol]
   return (
@@ -48,7 +50,7 @@ function Frame({ children }: { children: React.ReactNode }) {
         <LoginMarket />
         <div className="tagline">
           <h2>Build, test and automate rule-based strategies.</h2>
-          <p>Live prices from Delta Exchange. Automated orders only run after you enable live trading and set your risk limits.</p>
+          <p>Live prices from Delta Exchange or your MetaTrader 5 broker. Automated orders only run after you enable live trading and set your risk limits.</p>
         </div>
       </aside>
       <main className="auth-form">{children}</main>

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { audit, transaction, type Db } from './db.js'
 import { UserError } from './errors.js'
-import { validateDefinition, type StrategyDefinition, type ValidationContext, type ValidationResult } from '../shared/strategyRules.js'
-import type { BacktestMetrics, BacktestSummary, Strategy, StrategyVersion, Timeframe } from '../shared/ipc.js'
+import { SYMBOL_PATTERN, validateDefinition, venueOf, type StrategyDefinition, type ValidationContext, type ValidationResult } from '../shared/strategyRules.js'
+import type { BacktestMetrics, BacktestSummary, BrokerId, Strategy, StrategyVersion, Timeframe } from '../shared/ipc.js'
 
 interface Row {
   id: string
@@ -34,7 +34,7 @@ function assertStorable(d: StrategyDefinition): void {
   const fields: Record<string, string> = {}
   if (!d || d.version !== 2 || typeof d !== 'object') throw new UserError('validation_failed', 'Unsupported strategy format.')
   if (!d.name?.trim() || d.name.trim().length > 80) fields.name = 'Name is required (up to 80 characters)'
-  if (!/^[A-Z0-9_]{2,32}$/.test(d.symbol ?? '')) fields.symbol = 'Choose an instrument'
+  if (!SYMBOL_PATTERN[venueOf(d)].test(d.symbol ?? '')) fields.symbol = 'Choose an instrument'
   if (!Array.isArray(d.indicators) || !d.entry || !d.exit || !d.risk) throw new UserError('validation_failed', 'The strategy definition is incomplete.')
   if (JSON.stringify(d).length > 64_000) throw new UserError('validation_failed', 'The strategy definition is too large.')
   if (Object.keys(fields).length) throw new UserError('validation_failed', 'Please correct the highlighted fields.', fields)
@@ -43,8 +43,8 @@ function assertStorable(d: StrategyDefinition): void {
 export class StrategyStore {
   constructor(
     private readonly db: Db,
-    /** Supplies the instrument list for validation (null when it cannot be loaded). */
-    private readonly validationContext: () => Promise<ValidationContext>
+    /** Supplies the instrument list of a venue for validation (null when it cannot be loaded). */
+    private readonly validationContext: (venue: BrokerId) => Promise<ValidationContext>
   ) {}
 
   private lastBacktest(id: string): BacktestSummary | null {
@@ -82,16 +82,25 @@ export class StrategyStore {
   }
 
   async get(id: string): Promise<Strategy> {
-    return this.toStrategy(this.row(id), await this.validationContext())
+    const r = this.row(id)
+    return this.toStrategy(r, await this.validationContext(venueOf(JSON.parse(r.definition) as StrategyDefinition)))
   }
 
   async list(): Promise<Strategy[]> {
-    const ctx = await this.validationContext()
-    return (this.db.prepare('SELECT * FROM strategies ORDER BY updated_at DESC').all() as unknown as Row[]).map((r) => this.toStrategy(r, ctx))
+    const rows = this.db.prepare('SELECT * FROM strategies ORDER BY updated_at DESC').all() as unknown as Row[]
+    // each venue's instrument list is loaded once, and only if a strategy uses it
+    const contexts = new Map<BrokerId, Promise<ValidationContext>>()
+    const ctxFor = (v: BrokerId) => {
+      if (!contexts.has(v)) contexts.set(v, this.validationContext(v))
+      return contexts.get(v)!
+    }
+    const out: Strategy[] = []
+    for (const r of rows) out.push(this.toStrategy(r, await ctxFor(venueOf(JSON.parse(r.definition) as StrategyDefinition))))
+    return out
   }
 
   async validate(d: StrategyDefinition): Promise<ValidationResult> {
-    return validateDefinition(d, await this.validationContext())
+    return validateDefinition(d, await this.validationContext(venueOf(d)))
   }
 
   private activeSession(id: string): { mode: string } | undefined {

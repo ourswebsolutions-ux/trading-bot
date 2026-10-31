@@ -179,3 +179,70 @@ class Phase5BacktestTests(unittest.TestCase):
         d["risk"]["allocatedCapitalUsd"] = -5
         with self.assertRaises(RuleError):
             check_definition(d)
+
+
+class Mt5BacktestTests(unittest.TestCase):
+    """Venue parameters for MetaTrader 5 symbols; their defaults keep Delta results unchanged."""
+
+    def _fx(self, closes, spread=0.0):
+        cs = candles(closes)
+        for c in cs:
+            c["spread"] = spread
+        return cs
+
+    def test_pips_stops_and_targets_need_a_pip_size(self):
+        d = definition(entry=ALWAYS, exit={"long": None, "short": None},
+                       risk={"stopLoss": {"type": "pips", "value": 20}, "takeProfit": {"type": "pips", "value": 40}, "sizing": {"type": "fixed_quantity", "value": 1}, "maxDailyLossPct": 50, "maxTradesPerDay": 100, "feeBps": 0})
+        closes = [1.10 + 0.001 * math.sin(i / 3) for i in range(120)]
+        with self.assertRaises(Exception) as cm:
+            run_rules_backtest(d, self._fx(closes))
+        self.assertIn("pip size", str(cm.exception))
+        res = run_rules_backtest(d, self._fx(closes), pip_size=0.0001, units_per_lot=100_000)
+        self.assertTrue(res["trades"])
+        for t in res["trades"]:
+            if t["exitReason"] == "stop_loss":
+                self.assertLessEqual(t["exitPrice"] - t["entryPrice"], -0.0020 + 1e-9)
+            if t["exitReason"] == "take_profit":
+                self.assertAlmostEqual(t["exitPrice"] - t["entryPrice"], 0.0040, places=9)
+            self.assertEqual(t["quantity"], 100_000, "fixed quantity is in lots of 100,000 units")
+
+    def test_buys_fill_at_the_ask_and_short_exits_pay_the_spread_once(self):
+        d = definition(entry=ALWAYS, exit={"long": None, "short": None},
+                       risk={"stopLoss": {"type": "points", "value": 0.5}, "takeProfit": None, "sizing": {"type": "fixed_quantity", "value": 1}, "maxDailyLossPct": 50, "maxTradesPerDay": 100, "feeBps": 0})
+        closes = [100 + 2 * math.sin(i / 4) for i in range(80)]
+        no_spread = run_rules_backtest(d, self._fx(closes))
+        spread = run_rules_backtest(d, self._fx(closes, spread=0.05))
+        cs = candles(closes)
+        opens = {c["time"]: c["open"] for c in cs}
+        t = spread["trades"][0]
+        self.assertAlmostEqual(t["entryPrice"], opens[t["entryTime"]] + 0.05, places=9, msg="long entry at the ask")
+        self.assertLess(spread["metrics"]["netPnl"], no_spread["metrics"]["netPnl"])
+        # short: the stop triggers on the ask and fills at the stop level (not stop + spread)
+        ds = definition(direction="short", entry={"long": None, "short": ALWAYS["long"]}, exit={"long": None, "short": None},
+                        risk={"stopLoss": {"type": "points", "value": 0.5}, "takeProfit": None, "sizing": {"type": "fixed_quantity", "value": 1}, "maxDailyLossPct": 50, "maxTradesPerDay": 100, "feeBps": 0})
+        rising = [100 + 0.3 * i for i in range(60)]
+        r = run_rules_backtest(ds, self._fx(rising, spread=0.05))
+        stops = [x for x in r["trades"] if x["exitReason"] == "stop_loss"]
+        self.assertTrue(stops)
+        for x in stops:
+            self.assertLessEqual(x["exitPrice"] - x["entryPrice"], 0.5 + 0.3 + 1e-9, "never stop + an extra spread")
+
+    def test_point_value_converts_quote_currency_profit(self):
+        # USDJPY on a USD account: 1.0 JPY move is worth ~0.0067 USD per unit (0.6667 USD per pip-lot)
+        d = definition(entry=ALWAYS, exit={"long": None, "short": None},
+                       risk={"stopLoss": {"type": "percent", "value": 1}, "takeProfit": None, "sizing": {"type": "risk_percent", "value": 1}, "maxDailyLossPct": 50, "maxTradesPerDay": 100, "feeBps": 0})
+        falling = [150 * (0.985 ** i) for i in range(96)]
+        r = run_rules_backtest(d, candles(falling, step=900), point_value=0.6667 / 100)
+        stops = [t for t in r["trades"] if t["exitReason"] == "stop_loss"]
+        self.assertTrue(stops)
+        self.assertAlmostEqual(stops[0]["pnl"], -100, delta=60, msg="1% of 10,000 lost at the stop, in account currency")
+        self.assertRaises(Exception, run_rules_backtest, d, candles(falling), point_value=0)
+
+    def test_defaults_are_the_delta_behaviour(self):
+        d = definition(risk={"stopLoss": {"type": "percent", "value": 2}, "takeProfit": {"type": "percent", "value": 3}, "sizing": {"type": "percent_equity", "value": 50}, "maxDailyLossPct": 50, "maxTradesPerDay": 100, "feeBps": 5})
+        a = run_rules_backtest(d, candles(WAVE))
+        b = run_rules_backtest(d, candles(WAVE), point_value=1.0, units_per_lot=None, pip_size=None)
+        self.assertEqual(a, b)
+        check_definition(d)
+        bad = definition(risk={**d["risk"], "stopLoss": {"type": "trailing", "value": 1}})
+        self.assertRaises(RuleError, check_definition, bad)

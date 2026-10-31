@@ -5,6 +5,7 @@ import { Badge, Banner, Button, ConfirmDialog, Field, PasswordInput, Panel, Prog
 import { call, errorMessage, fieldErrors } from '../lib/api'
 import { ago, dateTime } from '../lib/format'
 import { useEvent, useNow, useResource } from '../lib/hooks'
+import { useBroker } from '../lib/broker'
 import { useApp } from '../lib/state'
 
 interface FieldDef {
@@ -26,6 +27,18 @@ export const INTEGRATION_META: Record<IntegrationId, { title: string; icon: Icon
       { key: 'region', label: 'Account region', hint: 'India and Global are separate exchanges with separate API keys and instruments.' },
       { key: 'apiKey', label: 'API key', secret: true },
       { key: 'apiSecret', label: 'API secret', secret: true }
+    ]
+  },
+  mt5: {
+    title: 'MetaTrader 5',
+    icon: 'exchange',
+    blurb: 'Forex and CFDs through your broker’s MetaTrader 5 terminal, using MetaQuotes’ official MetaTrader5 Python package. Needs Windows with the MT5 terminal installed. Prices, symbols and your account come from the terminal; live orders are only sent after you enable live trading for MetaTrader 5 and set risk limits. Use a demo account first — check with your broker that it accepts clients from your country.',
+    fields: [
+      { key: 'server', label: 'Trade server', placeholder: 'Broker-Demo', hint: 'Exactly as shown in the terminal’s login dialog' },
+      { key: 'login', label: 'Login (account number)', type: 'number' },
+      { key: 'password', label: 'Password', secret: true, hint: 'The trading (master) password. Encrypted with your OS keychain; never shown again.' },
+      { key: 'terminalPath', label: 'Terminal path (optional)', placeholder: 'C:\\Program Files\\MetaTrader 5\\terminal64.exe', hint: 'Leave empty to use the installed terminal' },
+      { key: 'deviationPoints', label: 'Max price deviation (points)', type: 'number', hint: 'Slippage allowed on market orders, in points (10 points = 1 pip on 5-digit pairs)' }
     ]
   },
   marketdata: {
@@ -159,15 +172,17 @@ function MarketHealthDetails({ health }: { health: MarketHealth }) {
   )
 }
 
+/** The active broker's default chart symbol (market:instruments lists the active broker's symbols). */
 function DefaultInstrument() {
-  const { prefs, setPrefs } = useApp()
+  const { setPrefs } = useApp()
+  const { broker, defaultSymbol: current, defaultSymbolKey } = useBroker()
   const toast = useToast()
-  const instruments = useResource(() => call('market:instruments', {}), [])
+  const instruments = useResource(() => call('market:instruments', {}), [broker])
   const [saving, setSaving] = useState(false)
-  const current = prefs?.defaultSymbol ?? ''
   const listed = instruments.data?.some((i) => i.symbol === current)
+  const where = broker === 'mt5' ? 'at this broker' : 'in this region'
   return (
-    <Field label="Default instrument" hint={instruments.error ? instruments.error : listed === false ? `${current} is not listed in this region — choose another.` : 'Shown on the dashboard and trading screen.'} error={listed === false ? `${current} unavailable in this region` : undefined}>
+    <Field label="Default instrument" hint={instruments.error ? instruments.error : listed === false ? `${current} is not listed ${where} — choose another.` : 'Shown on the dashboard and trading screen.'} error={listed === false ? `${current} unavailable ${where}` : undefined}>
       <select
         className="select mono"
         value={current}
@@ -175,7 +190,7 @@ function DefaultInstrument() {
         onChange={async (e) => {
           setSaving(true)
           try {
-            setPrefs(await call('settings:savePreferences', { defaultSymbol: e.target.value }))
+            setPrefs(await call('settings:savePreferences', { [defaultSymbolKey]: e.target.value }))
             toast({ tone: 'ok', title: `Default instrument set to ${e.target.value}` })
           } catch (err) {
             toast({ tone: 'bad', title: 'Not saved', body: errorMessage(err) })
@@ -188,6 +203,40 @@ function DefaultInstrument() {
         {(instruments.data ?? []).map((i: Instrument) => <option key={i.symbol} value={i.symbol}>{i.symbol} — {i.description}</option>)}
       </select>
     </Field>
+  )
+}
+
+interface Mt5Remembered {
+  login: number
+  server: string
+  currency: string
+  tradeMode: 'demo' | 'contest' | 'real'
+  marginMode: string
+  company: string
+}
+
+function Mt5Details({ view }: { view: IntegrationView }) {
+  const { broker } = useBroker()
+  const supported = view.extras.platformSupported === true
+  const acct = view.extras.account as Mt5Remembered | null | undefined
+  const algo = view.extras.algoTrading as boolean | null | undefined
+  return (
+    <>
+      {!supported && (
+        <Banner tone="warn" title="Windows only">
+          {String(view.extras.platformMessage ?? 'MetaTrader 5 needs Windows with the MT5 terminal installed.')} You can save your details here, but connecting, prices and trading only work on Windows.
+        </Banner>
+      )}
+      {acct && (
+        <dl className="kv" style={{ gridTemplateColumns: '190px 1fr' }}>
+          <dt>Account</dt><dd className="mono">{acct.login} · {acct.server}</dd>
+          <dt>Broker</dt><dd>{acct.company}</dd>
+          <dt>Account type</dt><dd>{acct.tradeMode === 'real' ? <Badge tone="bad">Real money</Badge> : <Badge tone="ok">{acct.tradeMode === 'demo' ? 'Demo' : 'Contest'}</Badge>} · {acct.currency} · {acct.marginMode} positions</dd>
+          <dt>Algo Trading</dt><dd>{algo === null || algo === undefined ? 'unknown' : algo ? <Badge tone="ok">allowed</Badge> : <Badge tone="warn">off — needed for live trading</Badge>}</dd>
+        </dl>
+      )}
+      {broker !== 'mt5' && <Banner tone="info">MetaTrader 5 is not the active broker. Choose it under Settings → General to see its prices, account and symbols across the app.</Banner>}
+    </>
   )
 }
 
@@ -246,6 +295,7 @@ function WhatsAppConsents({ view, run, busy }: { view: IntegrationView; run: (ac
 export function IntegrationSection({ view, onChange, storageOk }: { view: IntegrationView; onChange: () => void; storageOk: boolean }) {
   const toast = useToast()
   const meta = INTEGRATION_META[view.id]
+  const { broker } = useBroker()
   const step = useProgress(view.id)
   const [config, setConfig] = useState<Record<string, string>>(view.config)
   const [secrets, setSecrets] = useState<Record<string, string>>({})
@@ -348,9 +398,10 @@ export function IntegrationSection({ view, onChange, storageOk }: { view: Integr
         )}
         {lastAction && <Banner tone={lastAction.ok ? 'ok' : 'bad'} title={`Last action ${lastAction.ok ? 'succeeded' : 'failed'} · ${ago(lastAction.at)}`}>{lastAction.message}</Banner>}
         {view.id === 'marketdata' && health && <MarketHealthDetails health={health} />}
+        {view.id === 'mt5' && <Mt5Details view={view} />}
 
         <div className="form-row">{meta.fields.map(renderField)}</div>
-        {view.id === 'marketdata' && <div className="form-row"><DefaultInstrument /></div>}
+        {view.id === (broker === 'mt5' ? 'mt5' : 'marketdata') && <div className="form-row"><DefaultInstrument /></div>}
 
         <div className="btn-row">
           <Button variant="primary" onClick={save} loading={saving} disabled={!dirty || busy !== null}>Save</Button>

@@ -10,6 +10,8 @@ export interface OrderResult {
   avgPrice: number | null
   fee: number
   note: string | null
+  /** MT5: the position the fill opened or changed. */
+  positionTicket?: number | null
 }
 
 export interface MarketOrderRequest {
@@ -22,6 +24,8 @@ export interface MarketOrderRequest {
   stopPrice?: number | null
   takePrice?: number | null
   tickSize: number
+  /** MT5: close/reduce this position (hedging accounts can hold several per symbol). */
+  positionTicket?: number | null
 }
 
 export interface ExchangeFill {
@@ -32,16 +36,20 @@ export interface ExchangeFill {
   at: string
 }
 
-/** Execution venue. Live = Delta Exchange; paper = simulated fills at the live mark price. */
+/**
+ * Execution venue. Live = Delta Exchange (by product id) or MetaTrader 5 (by symbol); paper =
+ * simulated fills. The symbol arguments are optional so Delta keeps its original calls.
+ */
 export interface ExchangeAdapter {
   readonly mode: AutomationMode
   placeMarket(o: MarketOrderRequest): Promise<OrderResult>
   orderByClientId(clientOrderId: string): Promise<OrderResult | null>
-  cancel(exchangeOrderId: string, productId: number): Promise<void>
-  /** Signed position size in contracts (null when the venue has no independent position record). */
-  position(productId: number): Promise<{ size: number; entryPrice: number | null } | null>
-  cancelAll(productId: number, includeProtectiveOrders: boolean): Promise<void>
-  fillsSince(productId: number, sinceMs: number): Promise<ExchangeFill[]>
+  cancel(exchangeOrderId: string, productId: number, symbol?: string): Promise<void>
+  /** Signed position size in the venue's volume unit (null when the venue has no independent position record). */
+  position(productId: number, symbol?: string): Promise<{ size: number; entryPrice: number | null } | null>
+  cancelAll(productId: number, includeProtectiveOrders: boolean, symbol?: string): Promise<void>
+  /** MT5 passes the position ticket so a position's own closing deals are found exactly. */
+  fillsSince(productId: number, sinceMs: number, symbol?: string, positionTicket?: number | null): Promise<ExchangeFill[]>
 }
 
 export function priceString(price: number, tick: number): string {
@@ -109,21 +117,29 @@ export class DeltaExchange implements ExchangeAdapter {
   }
 }
 
-/** Simulated venue: fills the full size immediately at the current mark price, charging the strategy's fee assumption. */
+/**
+ * Simulated venue: fills the full size immediately, charging the fee assumption. Delta fills at
+ * the mark price; venues with a bid/ask (MT5) buy at the ask and sell at the bid, so the spread
+ * is paid as it would be at the broker. Configured slippage is applied against every fill.
+ */
 export class PaperExchange implements ExchangeAdapter {
   readonly mode = 'paper' as const
   private orders = new Map<string, OrderResult>()
 
   constructor(
     private readonly markPrice: (symbol: string) => Promise<number>,
+    /** Account-currency value of a 1.0 price move per unit of volume (Delta: the contract value). */
     private readonly contractValue: (symbol: string) => number,
     private readonly feeBps: (symbol: string) => number,
     /** Simulated adverse slippage per fill (basis points). */
-    private readonly slippageBps: () => number = () => 0
+    private readonly slippageBps: () => number = () => 0,
+    /** Bid/ask source; when given, fills use it instead of the mark price. */
+    private readonly quote?: (symbol: string) => Promise<{ bid: number; ask: number }>
   ) {}
 
   async placeMarket(o: MarketOrderRequest): Promise<OrderResult> {
-    const mark = await this.markPrice(o.symbol)
+    const q = this.quote ? await this.quote(o.symbol) : null
+    const mark = q ? (o.side === 'buy' ? q.ask : q.bid) : await this.markPrice(o.symbol)
     const slip = Math.max(0, this.slippageBps()) / 10_000
     const price = o.side === 'buy' ? mark * (1 + slip) : mark * (1 - slip)
     const fee = o.size * this.contractValue(o.symbol) * price * (this.feeBps(o.symbol) / 10_000)

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { AutomationMode, AutomationSessionView, Strategy, TradingOverview } from '@shared/ipc'
+import { BROKER_LABEL, type AutomationMode, type AutomationSessionView, type BrokerId, type Strategy, type TradingOverview } from '@shared/ipc'
+import { venueOf } from '@shared/strategyRules'
 import { RISK_LIMITS, type TradingRiskSettings } from '@shared/tradingRisk'
 import { Icon } from '../../components/icons'
 import { PaywallBanner, useAccess } from '../../components/paywall'
@@ -9,8 +10,8 @@ import { ago, dateTime, money, price, qty } from '../../lib/format'
 import { useNow } from '../../lib/hooks'
 import { useApp } from '../../lib/state'
 
-export function ModePill({ mode }: { mode: AutomationMode }) {
-  return <span className={`mode-pill ${mode}`} title={mode === 'paper' ? 'Simulated: no real orders' : 'Real orders on Delta Exchange'}>{mode === 'live' ? 'Live' : 'Paper · simulated'}</span>
+export function ModePill({ mode, broker = 'delta' }: { mode: AutomationMode; broker?: BrokerId }) {
+  return <span className={`mode-pill ${mode}`} title={mode === 'paper' ? 'Simulated: no real orders' : `Real orders on ${BROKER_LABEL[broker]}`}>{mode === 'live' ? 'Live' : 'Paper · simulated'}</span>
 }
 
 function EmergencyBar({ o, onChange }: { o: TradingOverview; onChange: (o: TradingOverview) => void }) {
@@ -69,16 +70,22 @@ function LivePanel({ o, onChange }: { o: TradingOverview; onChange: (o: TradingO
   const [disabling, setDisabling] = useState(false)
   const [password, setPassword] = useState('')
   const [phrase, setPhrase] = useState('')
+  const [accountNo, setAccountNo] = useState('')
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const ready = o.live.checks.every((c) => c.ok)
+  const mt5 = o.live.broker === 'mt5'
+  const acct = o.live.account ?? null
+  // a real-money (or contest) MT5 account needs its account number typed as well
+  const needsAccount = mt5 && acct !== null && acct.tradeMode !== 'demo'
+  const demoFunds = mt5 ? acct?.tradeMode === 'demo' : o.live.testnet
   return (
-    <Panel title="Live trading" actions={o.live.enabled ? <Badge tone="bad"><Icon name="bolt" size={11} /> ON</Badge> : <Badge>Off</Badge>}>
+    <Panel title={`Live trading · ${BROKER_LABEL[o.live.broker]}`} actions={o.live.enabled ? <Badge tone="bad"><Icon name="bolt" size={11} /> ON</Badge> : <Badge>Off</Badge>}>
       <div style={{ display: 'grid', gap: 10 }}>
         <div className="muted" style={{ fontSize: 12.5 }}>
           {o.live.enabled
-            ? `Live automations can send real orders to ${o.live.regionLabel}${o.live.testnet ? ' (testnet — demo funds)' : ' — REAL MONEY'}. Enabled ${dateTime(o.live.enabledAt)}.`
-            : 'Off: automations can only run in paper mode. Live orders require every check below, your password and an explicit confirmation.'}
+            ? `Live automations can send real orders to ${o.live.regionLabel}${demoFunds ? (mt5 ? ' (demo account — demo funds)' : ' (testnet — demo funds)') : ' — REAL MONEY'}. Enabled ${dateTime(o.live.enabledAt)}.`
+            : `Off: ${BROKER_LABEL[o.live.broker]} automations can only run in paper mode. Live orders require every check below, your password and an explicit confirmation.${mt5 ? ' Live trading is enabled separately for each broker.' : ''}`}
         </div>
         {o.live.checks.map((c) => (
           <div key={c.id} className="check-row">
@@ -108,11 +115,11 @@ function LivePanel({ o, onChange }: { o: TradingOverview; onChange: (o: TradingO
         <Dialog title="Enable live trading" onClose={() => !busy && setEnabling(false)} footer={
           <>
             <Button variant="ghost" onClick={() => setEnabling(false)} disabled={busy}>Cancel</Button>
-            <Button variant="danger" loading={busy} disabled={phrase !== 'ENABLE LIVE TRADING' || !password} onClick={async () => {
+            <Button variant="danger" loading={busy} disabled={phrase !== 'ENABLE LIVE TRADING' || !password || (needsAccount && accountNo.trim() !== String(acct?.login))} onClick={async () => {
               setBusy(true)
               setErrors({})
               try {
-                onChange(await call('trading:enableLive', { password, confirmation: phrase }))
+                onChange(await call('trading:enableLive', { password, confirmation: phrase, ...(mt5 ? { accountConfirmation: accountNo.trim() } : {}) }))
                 setEnabling(false)
                 toast({ tone: 'ok', title: 'Live trading enabled', body: 'Start a live automation from the strategy list.' })
               } catch (err) {
@@ -125,11 +132,27 @@ function LivePanel({ o, onChange }: { o: TradingOverview; onChange: (o: TradingO
             }}>Enable live trading</Button>
           </>
         }>
-          <p style={{ margin: 0 }}>Live automations will place real market orders on <b>{o.live.regionLabel}</b>{o.live.testnet ? ' (testnet)' : ''} using your API key, with exchange-side stop-loss and take-profit orders. Risk limits are enforced on every order; nothing an AI or a strategy says can bypass them.</p>
-          <p style={{ margin: 0 }}>Trading involves risk of loss. Make sure the API key only has the permissions you intend (trading enabled, withdrawals disabled).</p>
+          {mt5 ? (
+            <>
+              <p style={{ margin: 0 }}>Live automations will send real market orders through your MetaTrader 5 terminal to <b>{acct ? `${acct.server}, account ${acct.login}` : o.live.regionLabel}</b>{acct?.tradeMode === 'demo' ? ' (demo account)' : ''}, with the stop-loss and take-profit set on the position at the broker. Risk limits are enforced on every order; nothing an AI or a strategy says can bypass them.</p>
+              {needsAccount ? (
+                <Banner tone="bad" title={acct!.tradeMode === 'real' ? 'This is a REAL-MONEY account' : 'This is a contest account'}>Orders will use real funds{acct!.tradeMode === 'contest' ? ' or contest rules' : ''}. Test on a demo account first. Type the account number below to confirm.</Banner>
+              ) : <p style={{ margin: 0 }}>Trading involves risk of loss, and forex/CFD leverage magnifies it.</p>}
+            </>
+          ) : (
+            <>
+              <p style={{ margin: 0 }}>Live automations will place real market orders on <b>{o.live.regionLabel}</b>{o.live.testnet ? ' (testnet)' : ''} using your API key, with exchange-side stop-loss and take-profit orders. Risk limits are enforced on every order; nothing an AI or a strategy says can bypass them.</p>
+              <p style={{ margin: 0 }}>Trading involves risk of loss. Make sure the API key only has the permissions you intend (trading enabled, withdrawals disabled).</p>
+            </>
+          )}
           <Field label="Type ENABLE LIVE TRADING" error={errors.confirmation}>
             <input className="input mono" value={phrase} onChange={(e) => setPhrase(e.target.value)} autoComplete="off" />
           </Field>
+          {needsAccount && (
+            <Field label={`Type the account number (${acct!.login})`} error={errors.accountConfirmation}>
+              <input className="input mono" value={accountNo} onChange={(e) => setAccountNo(e.target.value)} autoComplete="off" inputMode="numeric" />
+            </Field>
+          )}
           <Field label="Your TradePilot password" error={errors.password}>
             <PasswordInput value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
           </Field>
@@ -140,11 +163,11 @@ function LivePanel({ o, onChange }: { o: TradingOverview; onChange: (o: TradingO
 }
 
 const RISK_FIELDS: { key: keyof typeof RISK_LIMITS; label: string; hint: string }[] = [
-  { key: 'maxOrderNotionalUsd', label: 'Max order size (USD notional)', hint: 'Orders are reduced to fit; blocked if not even one contract fits' },
+  { key: 'maxOrderNotionalUsd', label: 'Max order size (notional)', hint: 'USD on Delta; MT5 account currency for MetaTrader 5. Orders are reduced to fit; blocked if not even the minimum fits' },
   { key: 'maxExposurePct', label: 'Max total exposure (% of equity)', hint: 'Sum of open position notionals' },
   { key: 'maxOpenPositions', label: 'Max open positions', hint: 'Across all automations of the same mode' },
   { key: 'accountMaxDailyLossPct', label: 'Account daily loss limit (%)', hint: 'No new entries after this realized loss (UTC day)' },
-  { key: 'paperStartingEquity', label: 'Paper account starting equity (USD)', hint: 'Used to size paper automations' },
+  { key: 'paperStartingEquity', label: 'Paper account starting equity', hint: 'Used to size paper automations (USD on Delta; account currency on MT5)' },
   { key: 'paperSlippageBps', label: 'Paper slippage (bps per fill)', hint: 'Simulated fills are moved against you by this much' }
 ]
 
@@ -245,7 +268,7 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
                     <tr key={st.id}>
                       <td>
                         <div style={{ fontWeight: 500 }}>{st.name}</div>
-                        <div className="faint mono" style={{ fontSize: 11.5 }}>{st.symbol} · {st.timeframe} · {s?.strategyVersion ? `running v${s.strategyVersion}` : `v${st.version}`}</div>
+                        <div className="faint mono" style={{ fontSize: 11.5 }}>{venueOf(st.definition) === 'mt5' ? 'MT5 · ' : ''}{st.symbol} · {st.timeframe} · {s?.strategyVersion ? `running v${s.strategyVersion}` : `v${st.version}`}</div>
                         {s && s.latestVersion !== null && s.strategyVersion !== null && s.latestVersion > s.strategyVersion && (
                           <div style={{ fontSize: 11.5, marginTop: 4 }}>
                             <span className="warn-text">v{s.latestVersion} saved, not applied.</span>{' '}
@@ -256,7 +279,7 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
                       <td>
                         {s ? (
                           <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                            <ModePill mode={s.mode} />
+                            <ModePill mode={s.mode} broker={s.broker} />
                             <Badge tone={s.status === 'running' ? 'ok' : 'warn'}>{s.status === 'running' ? 'Running' : 'Paused'}</Badge>
                           </span>
                         ) : <span className="faint">Not running</span>}
@@ -265,7 +288,7 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
                       <td className="nowrap">
                         {pos ? (
                           <>
-                            <div className={pos.side === 'long' ? 'up' : 'down'}>{pos.side.toUpperCase()} {qty(pos.contracts)} @ {price(pos.entryPrice)}</div>
+                            <div className={pos.side === 'long' ? 'up' : 'down'}>{pos.side.toUpperCase()} {qty(pos.contracts)}{s?.broker === 'mt5' ? ' lots' : ''} @ {price(pos.entryPrice)}</div>
                             <div className="faint mono" style={{ fontSize: 11.5 }}>SL {price(pos.stopPrice)} · TP {pos.takePrice ? price(pos.takePrice) : '—'}</div>
                           </>
                         ) : <span className="faint">flat</span>}
@@ -285,7 +308,11 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
                           {!s && (
                             <>
                               <Button size="sm" icon="play" loading={busy === `paper:${st.id}`} disabled={!allowed || busy !== null || o.emergency.active || !o.risk.configured} title={!o.risk.configured ? 'Save the risk settings first' : undefined} onClick={() => void run(`paper:${st.id}`, () => call('automation:start', { strategyId: st.id, mode: 'paper' }), 'Paper automation started').catch(() => undefined)}>Start paper</Button>
-                              <Button size="sm" variant="danger" icon="bolt" disabled={!allowed || busy !== null || !o.live.enabled || o.emergency.active} title={!o.live.enabled ? 'Enable live trading first' : undefined} onClick={() => setStartLive(st)}>Start live</Button>
+                              {(() => {
+                                const venue = venueOf(st.definition)
+                                const other = venue !== o.live.broker
+                                return <Button size="sm" variant="danger" icon="bolt" disabled={!allowed || busy !== null || other || !o.live.enabled || o.emergency.active} title={other ? `This strategy trades on ${BROKER_LABEL[venue]}. Make it the active broker (Settings → General) to start it live.` : !o.live.enabled ? 'Enable live trading first' : undefined} onClick={() => setStartLive(st)}>Start live</Button>
+                              })()}
                             </>
                           )}
                           {s?.status === 'running' && <Button size="sm" icon="pause" loading={busy === `pause:${s.id}`} disabled={busy !== null} onClick={() => void run(`pause:${s.id}`, () => call('automation:pause', { sessionId: s.id }), 'Automation paused').catch(() => undefined)}>Pause</Button>}
@@ -303,7 +330,7 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
       </Panel>
       {orphaned.length > 0 && (
         <Banner tone="warn" title="Stopped automations with open positions">
-          {orphaned.map((s) => `${s.strategyName} (${s.mode}) holds ${s.position!.side} ${s.position!.contracts} ${s.symbol}`).join('; ')}. {orphaned.some((s) => s.mode === 'live') ? 'Live positions keep their exchange-side stop-loss / take-profit; manage them on Delta Exchange if needed.' : 'Paper positions are still monitored for their stop-loss / take-profit.'}
+          {orphaned.map((s) => `${s.strategyName} (${s.mode}) holds ${s.position!.side} ${s.position!.contracts} ${s.symbol}`).join('; ')}. {orphaned.some((s) => s.mode === 'live') ? `Live positions keep their exchange-side stop-loss / take-profit; manage them on ${[...new Set(orphaned.filter((s) => s.mode === 'live').map((s) => BROKER_LABEL[s.broker]))].join(' / ')} if needed.` : 'Paper positions are still monitored for their stop-loss / take-profit.'}
         </Banner>
       )}
       <div className="grid cols-2" style={{ alignItems: 'start' }}>
@@ -339,7 +366,7 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
       )}
       {startLive && (
         <ConfirmDialog title={`Start LIVE automation for ${startLive.name}?`} tone="danger" confirmLabel="Start live automation" onClose={() => setStartLive(null)} onConfirm={() => run(`live:${startLive.id}`, () => call('automation:start', { strategyId: startLive.id, mode: 'live' }), 'Live automation started')}>
-          Real market orders for <b>{startLive.symbol}</b> will be sent to {o.live.regionLabel}{o.live.testnet ? ' (testnet)' : ''} whenever the strategy's rules trigger on a closed {startLive.timeframe} candle, within your risk limits.
+          Real market orders for <b>{startLive.symbol}</b> will be sent to {o.live.regionLabel}{o.live.broker === 'mt5' ? (o.live.account?.tradeMode === 'demo' ? ' (demo account)' : ' — REAL MONEY') : o.live.testnet ? ' (testnet)' : ''} whenever the strategy's rules trigger on a closed {startLive.timeframe} candle, within your risk limits.
         </ConfirmDialog>
       )}
     </div>

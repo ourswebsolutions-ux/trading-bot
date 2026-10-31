@@ -237,7 +237,7 @@ describe('Phase 5: prompts and versions in the strategy store', () => {
     const now = new Date().toISOString()
     db.prepare(`INSERT INTO strategies (id, name, symbol, timeframe, definition, status, source, enabled_at, created_at, updated_at) VALUES ('s1', 'Old', 'BTCUSD', '1h', ?, 'enabled', 'manual', ?, ?, ?)`).run(JSON.stringify(rsiStrategy({ name: 'Old' })), now, now, now)
     db.prepare(`INSERT INTO automation_sessions (id, strategy_id, strategy_name, symbol, product_id, timeframe, mode, status, started_at, created_at, updated_at) VALUES ('a1', 's1', 'Old', 'BTCUSD', 27, '1h', 'paper', 'running', ?, ?, ?)`).run(now, now, now)
-    assert.deepEqual(migrate(db), [5])
+    assert.deepEqual(migrate(db), [5, 6, 7])
     const v = db.prepare('SELECT version, source FROM strategy_versions WHERE strategy_id = ?').get('s1') as { version: number; source: string }
     assert.deepEqual({ ...v }, { version: 1, source: 'manual' })
     const sess = db.prepare('SELECT strategy_version, definition FROM automation_sessions WHERE id = ?').get('a1') as { strategy_version: number; definition: string }

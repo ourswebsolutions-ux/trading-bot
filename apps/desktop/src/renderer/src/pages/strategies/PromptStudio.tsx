@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { AiProviderId, ChatMessage, InterpretationTurn, Strategy } from '@shared/ipc'
-import { diffDefinitions, type StrategyDefinition } from '@shared/strategyRules'
+import { BROKER_LABEL } from '@shared/ipc'
+import { diffDefinitions, venueOf, type StrategyDefinition } from '@shared/strategyRules'
 import { Badge, Banner, Button, Field, Panel, Spinner, useToast } from '../../components/ui'
 import { call, errorMessage } from '../../lib/api'
 import { useResource } from '../../lib/hooks'
+import { useBroker } from '../../lib/broker'
 import { useApp } from '../../lib/state'
 import { ExplanationView, RulesView, ValidationList } from './parts'
 
@@ -24,6 +26,11 @@ const EXAMPLES = [
   'On the 1-hour chart, buy BTCUSD when the 20 EMA crosses above the 50 EMA and sell when it crosses back below. Risk 1% per trade with a 2× ATR stop, at most 3 trades and 3% loss per day.',
   'Short ETHUSD on the 4-hour chart when the close breaks below the lowest low of the last 20 candles. Stop-loss 2%, take-profit at 2 times the risk, 10% of equity per trade, max 2 trades a day and $50 daily loss.'
 ]
+const MT5_EXAMPLES = [
+  'Buy EURUSD on the 1-hour chart when the 20 EMA crosses above the 50 EMA. Risk 1% per trade with a 25 pip stop-loss and a 50 pip take-profit, at most 3 trades and 3% loss per day.',
+  'Sell GBPUSD on the 15-minute chart when RSI(14) crosses below 70. Fixed 0.10 lots, stop-loss 15 pips, take-profit 2 times the risk, max 2 trades a day and 2% daily loss.',
+  'Trade USDJPY on the 4-hour chart both ways: buy when the close breaks above the highest high of the last 20 candles, sell short when it breaks below the lowest low. 1.5× ATR stop, risk 0.5% per trade, max 2% daily loss.'
+]
 
 function userTextOf(entries: Entry[]): string[] {
   return entries.filter((e): e is { role: 'user'; content: string } => e.role === 'user').map((e) => e.content)
@@ -39,6 +46,9 @@ export function PromptStudio({ mode, onClose, onSaved, onAdvanced }: {
   const toast = useToast()
   const { navigate } = useApp()
   const base = mode.kind === 'create' ? null : mode.base
+  const active = useBroker()
+  // a new strategy is drafted for the active broker; changes keep the strategy's own broker
+  const venue = base ? venueOf(base.definition) : active.broker
   const integrations = useResource(() => call('integrations:list'), [])
   const prefs = useResource(() => call('ai:getPreferences'), [])
   const providers = (integrations.data ?? []).filter((v) => (v.id === 'openai' || v.id === 'anthropic') && v.state !== 'not_configured')
@@ -76,7 +86,7 @@ export function PromptStudio({ mode, onClose, onSaved, onAdvanced }: {
     setError(null)
     try {
       const messages: ChatMessage[] = next.map((e) => (e.role === 'user' ? { role: 'user', content: e.content } : { role: 'assistant', content: e.turn.assistantMessage }))
-      const turn = await call('ai:interpretStrategy', { provider, messages, ...(mode.kind === 'modify' ? { baseStrategyId: mode.base.id } : {}) })
+      const turn = await call('ai:interpretStrategy', { provider, messages, venue, ...(mode.kind === 'modify' ? { baseStrategyId: mode.base.id } : {}) })
       setEntries([...next, { role: 'assistant', turn }])
     } catch (err) {
       setError(errorMessage(err))
@@ -161,7 +171,7 @@ export function PromptStudio({ mode, onClose, onSaved, onAdvanced }: {
             )}
             <Field
               label={mode.kind === 'modify' ? 'What should change?' : 'Describe your strategy'}
-              hint={mode.kind === 'modify' ? 'For example: “tighten the stop-loss to 1% and allow at most 2 trades a day”. Everything you do not mention stays the same.' : 'Instrument, timeframe, when to enter and exit, position size, stop-loss and daily limits. The AI asks about anything missing.'}
+              hint={mode.kind === 'modify' ? 'For example: “tighten the stop-loss to 1% and allow at most 2 trades a day”. Everything you do not mention stays the same.' : `For ${BROKER_LABEL[venue]}${venue === 'mt5' ? ' (forex; stops can be in pips, sizes in lots)' : ''}: instrument, timeframe, when to enter and exit, position size, stop-loss and daily limits. The AI asks about anything missing.`}
             >
               <textarea
                 className="textarea prompt-editor"
@@ -169,7 +179,7 @@ export function PromptStudio({ mode, onClose, onSaved, onAdvanced }: {
                 maxLength={4000}
                 value={prompt}
                 disabled={busy || saving}
-                placeholder={mode.kind === 'modify' ? 'Describe the change…' : 'Trade BTC on the 15-minute chart when…'}
+                placeholder={mode.kind === 'modify' ? 'Describe the change…' : venue === 'mt5' ? 'Buy EURUSD on the 1-hour chart when…' : 'Trade BTC on the 15-minute chart when…'}
                 onChange={(e) => setPrompt(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) interpret()
@@ -179,7 +189,7 @@ export function PromptStudio({ mode, onClose, onSaved, onAdvanced }: {
             {mode.kind === 'create' && !entries.length && (
               <div className="prompt-examples">
                 <span className="faint" style={{ fontSize: 12 }}>Examples:</span>
-                {EXAMPLES.map((ex, i) => (
+                {(venue === 'mt5' ? MT5_EXAMPLES : EXAMPLES).map((ex, i) => (
                   <button key={i} type="button" className="chip" onClick={() => setPrompt(ex)} disabled={busy}>{ex.slice(0, 64)}…</button>
                 ))}
               </div>

@@ -72,7 +72,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r engine/requirements-build.txt
-          node scripts/build-engine.mjs python
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # MetaTrader 5 bridge (official MetaTrader5 package, Windows only)
+            python -m pip install -r engine/requirements-mt5.txt
+            node scripts/build-engine.mjs python --mt5
+          else
+            node scripts/build-engine.mjs python
+          fi
 
       - name: Build the desktop app
         run: npm run build -w @tradepilot/desktop

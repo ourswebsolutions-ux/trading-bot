@@ -16,6 +16,7 @@ from . import LIVE_TRADING_ENABLED, __version__
 from .backtest import BacktestError, run_backtest
 from .rules import RuleError, run_rules_backtest
 from .live import LiveError, evaluate_session, protective_levels
+from .analysis import AnalysisError, market_analysis
 from .strategies import RISK_LIMITS, STRATEGY_TYPES, ValidationError, validate
 
 
@@ -65,6 +66,14 @@ def _backtest_rules(params: Dict[str, Any]) -> Dict[str, Any]:
             float(params.get("initialEquity", 10_000)),
             fee_bps=None if fee is None else float(fee),
             slippage_bps=float(params.get("slippageBps") or 0),
+            point_value=float(params.get("pointValue") or 1.0),
+            units_per_lot=None if params.get("unitsPerLot") is None else float(params["unitsPerLot"]),
+            pip_size=None if params.get("pipSize") is None else float(params["pipSize"]),
+            volume_step=None if params.get("volumeStep") is None else float(params["volumeStep"]),
+            volume_min=None if params.get("volumeMin") is None else float(params["volumeMin"]),
+            volume_max=None if params.get("volumeMax") is None else float(params["volumeMax"]),
+            commission_per_lot=float(params.get("commissionPerLot") or 0),
+            extra_metrics=bool(params.get("extraMetrics")),
         )
     except RuleError as e:
         raise RpcError("invalid_strategy", str(e))
@@ -84,9 +93,16 @@ def _session_evaluate(params: Dict[str, Any]) -> Dict[str, Any]:
 def _protective_levels(params: Dict[str, Any]) -> Dict[str, Any]:
     try:
         side = 1 if params.get("side") == "long" else -1
-        return protective_levels(params["definition"], side, float(params["entryPrice"]), params.get("candles") or [], float(params.get("tickSize") or 0))
+        return protective_levels(params["definition"], side, float(params["entryPrice"]), params.get("candles") or [], float(params.get("tickSize") or 0), params.get("pipSize"))
     except (LiveError, KeyError, ValueError) as e:
         raise RpcError("invalid_request", str(e))
+
+
+def _market_analysis(params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return market_analysis(params)
+    except (AnalysisError, BacktestError) as e:
+        raise RpcError("invalid_data", str(e))
 
 
 def _live_order(_: Dict[str, Any]) -> Dict[str, Any]:
@@ -101,6 +117,7 @@ METHODS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "backtest_rules": _backtest_rules,
     "session_evaluate": _session_evaluate,
     "protective_levels": _protective_levels,
+    "market_analysis": _market_analysis,
     "place_live_order": _live_order,
 }
 

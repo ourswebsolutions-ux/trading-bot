@@ -31,9 +31,18 @@ import { StrategyStore } from './strategies.js'
 import { SubscriptionService } from './subscription.js'
 import { UpdateService } from './updater.js'
 import { loadDesktopConfig } from './config.js'
-import type { AiPreferences, BacktestMetrics, BacktestTrade, ChatMessage, EventContract, EventName, GeneralPreferences, IntegrationId, Timeframe } from '../shared/ipc.js'
-import type { StrategyDefinition } from '../shared/strategyRules.js'
+import type { AiPreferences, BacktestMetrics, BacktestTrade, BrokerId, ChatMessage, EventContract, EventName, GeneralPreferences, Instrument, IntegrationId, Timeframe } from '../shared/ipc.js'
+import { BrokerMarkets } from './brokers/markets.js'
+import { Mt5AccountService, tradeModeOf } from './mt5/account.js'
+import { GoldService } from './gold/service.js'
+import type { GoldSettings } from '../shared/gold.js'
+import { Mt5BridgeClient } from './mt5/client.js'
+import { Mt5Connection } from './mt5/connection.js'
+import { Mt5MarketData } from './mt5/marketData.js'
+import { Mt5Exchange } from './trading/mt5Exchange.js'
+import { venueOf, type StrategyDefinition } from '../shared/strategyRules.js'
 import { DEFAULT_RISK } from '../shared/tradingRisk.js'
+import { sizingSpecOf } from '../shared/sizing.js'
 
 // Development/test-only switches; packaged builds ignore them.
 const E2E_HIDDEN = !app.isPackaged && process.env.TRADEPILOT_E2E_HIDDEN === '1'
@@ -41,8 +50,12 @@ if (!app.isPackaged && process.env.TRADEPILOT_USER_DATA_DIR) app.setPath('userDa
 
 if (!app.requestSingleInstanceLock()) app.quit()
 
-const INTEGRATION_IDS: IntegrationId[] = ['delta', 'openai', 'anthropic', 'smtp', 'whatsapp', 'marketdata']
-const TIMEFRAMES: Timeframe[] = ['5m', '15m', '1h', '4h', '1d']
+const INTEGRATION_IDS: IntegrationId[] = ['delta', 'mt5', 'openai', 'anthropic', 'smtp', 'whatsapp', 'marketdata']
+/** Identifies TradePilot's orders and positions in MetaTrader 5 (shared by all MT5 automations). */
+const MT5_MAGIC = 260901
+/** Manual BUY/SELL orders from the Gold Bot page (kept apart from the bot's own orders). */
+const MT5_MANUAL_MAGIC = 260902
+const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
 const DEFAULT_PREFS: GeneralPreferences = {
   welcomeSound: true,
   theme: 'dark',
@@ -50,7 +63,11 @@ const DEFAULT_PREFS: GeneralPreferences = {
   desktopNotifications: true,
   autoInstallUpdates: true,
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
-  defaultSymbol: 'BTCUSD'
+  defaultSymbol: 'BTCUSD',
+  // XAUUSD on MetaTrader 5 is the primary instrument; MT5 exists only on Windows, so other
+  // systems start on Delta Exchange (the user can switch in Settings → General)
+  broker: process.platform === 'win32' ? 'mt5' : 'delta',
+  defaultSymbolMt5: 'XAUUSD'
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -107,21 +124,67 @@ async function bootstrap() {
   const secrets = new SecretStore(db, cipher)
   const usage = new AiUsageTracker(db)
   const consents = new ConsentStore(db)
-  let market: MarketDataService
+  let deltaMarket: MarketDataService
+  let mt5Market: Mt5MarketData
+  let mt5Conn: Mt5Connection
   const integrations: IntegrationService = new IntegrationService(
     db,
     secrets,
-    buildIntegrationSpecs({ integrations: () => integrations, market: () => market, usage, consents, defaultSymbol: () => prefs().defaultSymbol }),
+    buildIntegrationSpecs({ integrations: () => integrations, market: () => deltaMarket, usage, consents, defaultSymbol: () => prefs().defaultSymbol, mt5: () => ({ conn: mt5Conn, market: mt5Market }) }),
     (id, step) => emit('integrations:progress', { id, step }),
     migrateIntegrationConfig
   )
-  market = new MarketDataService({
+  const activeBroker = (): BrokerId => (prefs().broker === 'mt5' ? 'mt5' : 'delta')
+  deltaMarket = new MarketDataService({
     region: () => deltaRegion(integrations.config('delta')),
     settings: () => marketSettings(integrations.config('marketdata')),
-    onSnapshot: (snap) => emit('market:changed', snap),
-    onCandle: (c) => emit('market:candle', c),
+    onSnapshot: (snap) => activeBroker() === 'delta' && emit('market:changed', snap),
+    onCandle: (c) => activeBroker() === 'delta' && emit('market:candle', c),
     log
   })
+  const engineDir = app.isPackaged ? path.join(process.resourcesPath, 'engine') : path.resolve(app.getAppPath(), '../../engine')
+
+  // ---------------- MetaTrader 5 (Windows: official MetaTrader5 package + local MT5 terminal) ----------------
+  const mt5Client = new Mt5BridgeClient({
+    engineDir,
+    bundledExecutable: app.isPackaged ? path.join(engineDir, 'mt5', 'tradepilot-mt5-bridge.exe') : null,
+    python: () => prefs().pythonPath,
+    log
+  })
+  mt5Conn = new Mt5Connection(
+    mt5Client,
+    () => {
+      if (!integrations.isConfigured('mt5')) return null
+      const c = integrations.config('mt5')
+      return { login: c.login!, password: integrations.secret('mt5', 'password')!, server: c.server!, path: c.terminalPath || undefined }
+    },
+    // per trade server: another broker's server may run on another clock
+    {
+      get: () => getSetting<Record<string, number>>(db, 'mt5.serverOffsets', {})[integrations.config('mt5').server ?? ''] ?? null,
+      set: (sec) => setSetting(db, 'mt5.serverOffsets', { ...getSetting<Record<string, number>>(db, 'mt5.serverOffsets', {}), [integrations.config('mt5').server ?? '']: sec })
+    },
+    undefined,
+    log
+  )
+  mt5Market = new Mt5MarketData({
+    conn: mt5Conn,
+    settings: () => marketSettings(integrations.config('marketdata')),
+    onSnapshot: (snap) => activeBroker() === 'mt5' && emit('market:changed', snap),
+    onCandle: (c) => activeBroker() === 'mt5' && emit('market:candle', c),
+    log
+  })
+  const mt5Account = new Mt5AccountService(mt5Conn, () => integrations.isConfigured('mt5'))
+  // stateless; built per use so a changed slippage limit applies to the next order
+  const mt5Exchange = () => new Mt5Exchange(mt5Conn, { magic: MT5_MAGIC, deviationPoints: Number(integrations.config('mt5').deviationPoints) || 20 })
+  const mt5ManualExchange = () => new Mt5Exchange(mt5Conn, { magic: MT5_MANUAL_MAGIC, deviationPoints: Number(integrations.config('mt5').deviationPoints) || 20 })
+  const resetMt5 = () => {
+    void mt5Conn.reset()
+    mt5Market.applySettings()
+    mt5Account.invalidate()
+  }
+
+  // screens see the active broker; automation addresses each broker directly
+  const market = new BrokerMarkets({ delta: deltaMarket, mt5: mt5Market }, activeBroker)
   market.start()
   const account = new DeltaAccountService(integrations)
   const notifications = new NotificationCenter(
@@ -159,8 +222,7 @@ async function bootstrap() {
   })
 
   const paper = new PaperBroker(db, (s) => market.markPrice(s))
-  const strategies = new StrategyStore(db, async () => ({ instruments: await market.instruments().then((l) => l.map((i) => i.symbol)).catch(() => null) }))
-  const engineDir = app.isPackaged ? path.join(process.resourcesPath, 'engine') : path.resolve(app.getAppPath(), '../../engine')
+  const strategies = new StrategyStore(db, async (venue) => ({ instruments: await market.for(venue).instruments().then((l) => l.map((i) => i.symbol)).catch(() => null) }))
   const bundledEngine = app.isPackaged ? path.join(engineDir, 'bin', process.platform === 'win32' ? 'tradepilot-engine.exe' : 'tradepilot-engine') : null
   const engine = new EngineBridge(engineDir, () => prefs().pythonPath, (s) => emit('engine:changed', s), bundledEngine)
 
@@ -170,7 +232,7 @@ async function bootstrap() {
     if (!integrations.isConfigured('delta')) return null
     return new DeltaRest(deltaRegion(integrations.config('delta')), { apiKey: integrations.secret('delta', 'apiKey')!, apiSecret: integrations.secret('delta', 'apiSecret')! })
   }
-  let instrumentsCache: Awaited<ReturnType<typeof market.instruments>> = []
+  let instrumentsCache: Instrument[] = []
   const liveChecks = () => {
     const delta = integrations.view('delta')
     const recent = delta.lastSuccessAt && Date.now() - Date.parse(delta.lastSuccessAt) < 24 * 3600_000
@@ -182,22 +244,41 @@ async function bootstrap() {
       { id: 'region', label: region.testnet ? 'Testnet (demo) account' : 'Production account — real money', ok: true, detail: region.label }
     ]
   }
+  const mt5AccountInfo = () => (integrations.view('mt5').extras.account ?? null) as { login: number; server: string; tradeMode: 'demo' | 'contest' | 'real'; currency: string } | null
+  const mt5LiveChecks = () => {
+    const view = integrations.view('mt5')
+    const recent = view.lastSuccessAt && Date.now() - Date.parse(view.lastSuccessAt) < 24 * 3600_000
+    const platform = mt5Client.unavailable()
+    const acct = mt5AccountInfo()
+    const algo = view.extras.algoTrading === true
+    return [
+      { id: 'platform', label: 'Windows with the MetaTrader 5 terminal', ok: !platform, detail: platform ?? 'OK.' },
+      { id: 'mt5', label: 'MetaTrader 5 connected', ok: view.state === 'connected' && Boolean(recent), detail: view.state === 'connected' && recent ? `Last successful test ${new Date(view.lastSuccessAt!).toLocaleString()}.` : 'Run a successful MetaTrader 5 connection test (Settings → MetaTrader 5) within the last 24 hours.' },
+      { id: 'algo', label: 'Algo Trading allowed', ok: algo, detail: algo ? 'Allowed in the terminal and for the account.' : 'Turn on the "Algo Trading" button in the MT5 terminal (and check the account allows expert trading), then run the connection test again.' },
+      { id: 'risk', label: 'Account risk settings configured', ok: automation.risk().configured, detail: automation.risk().configured ? 'Risk limits saved (amounts are in the MT5 account currency).' : 'Save the account risk settings.' },
+      { id: 'emergency', label: 'Emergency stop not active', ok: !automation.emergency().active, detail: automation.emergency().active ? 'Clear the emergency stop first.' : 'OK.' },
+      { id: 'region', label: !acct ? 'Account type unknown' : acct.tradeMode === 'demo' ? 'Demo account' : acct.tradeMode === 'contest' ? 'Contest account' : 'REAL-MONEY account', ok: Boolean(acct), detail: acct ? `${acct.server} · login ${acct.login} · ${acct.currency}` : 'Run the connection test to identify the account.' }
+    ]
+  }
   let tradingEmitPending = false
   const automation: AutomationService = new AutomationService({
     db,
     engine: (method, params) => engine.request(method, params, 30_000),
     strategy: async (id) => strategies.get(id).catch(() => null),
     validate: (d) => strategies.validate(d),
-    candles: (symbol, tf, days) => market.candles(symbol, tf, days),
-    instruments: async () => (instrumentsCache = await market.instruments(true)),
-    markPrice: (symbol) => market.markPrice(symbol),
+    candles: (symbol, tf, days) => deltaMarket.candles(symbol, tf, days),
+    instruments: async () => (instrumentsCache = await deltaMarket.instruments(true)),
+    markPrice: (symbol) => deltaMarket.markPrice(symbol),
     liveExchange: () => {
       const rest = deltaRest()
       return rest ? new DeltaExchange(rest) : null
     },
     paperExchange: new PaperExchange(
-      (symbol) => market.markPrice(symbol),
-      (symbol) => instrumentsCache.find((i) => i.symbol === symbol)?.contractValue ?? 0,
+      (symbol) => deltaMarket.markPrice(symbol),
+      (symbol) => {
+        const inst = instrumentsCache.find((i) => i.symbol === symbol)
+        return (inst && sizingSpecOf(inst)?.valuePerPoint) ?? 0
+      },
       () => 5,
       () => automation.risk().paperSlippageBps
     ),
@@ -214,7 +295,44 @@ async function bootstrap() {
       const r = DELTA_REGIONS[deltaRegion(integrations.config('delta'))]
       return { id: r.id, label: r.label, testnet: r.testnet }
     },
-    watchSymbols: (symbols) => void market.watch('automation', symbols),
+    watchSymbols: (symbols) => void deltaMarket.watch('automation', symbols),
+    venues: {
+      mt5: {
+        candles: (symbol, tf, days) => mt5Market.candles(symbol, tf, days, true),
+        instruments: () => mt5Market.instruments(),
+        instrument: (symbol) => mt5Market.instrument(symbol),
+        markPrice: (symbol) => mt5Market.markPrice(symbol),
+        quote: (symbol) => mt5Market.quote(symbol),
+        isMarketOpen: (symbol) => mt5Market.isMarketOpen(symbol),
+        liveExchange: () => (integrations.isConfigured('mt5') && !mt5Client.unavailable() ? mt5Exchange() : null),
+        // spread is paid through bid/ask fills; no extra fee assumption
+        paperExchange: new PaperExchange((symbol) => mt5Market.markPrice(symbol), () => 0, () => 0, () => automation.risk().paperSlippageBps, (symbol) => mt5Market.quote(symbol)),
+        liveAccount: async () => {
+          const a = await mt5Conn.account()
+          return { equity: a.equity, available: a.margin_free }
+        },
+        liveChecks: mt5LiveChecks,
+        region: () => {
+          const acct = mt5AccountInfo()
+          return { id: 'mt5', label: `MetaTrader 5 · ${acct?.server ?? (integrations.config('mt5').server || 'not set up')}`, testnet: acct ? acct.tradeMode !== 'real' : false }
+        },
+        watchSymbols: (symbols) => void mt5Market.watch('automation', symbols),
+        accountIdentity: async () => {
+          const a = await mt5Conn.account()
+          return { login: String(a.login), mode: tradeModeOf(a) }
+        },
+        // manual Gold Bot trades count toward the open-position and exposure limits
+        extraOpen: async () => {
+          const manual = (await mt5Conn.read((c) => c.positions({ magic: MT5_MANUAL_MAGIC }))).filter((p) => p.magic === MT5_MANUAL_MAGIC)
+          let exposure = 0
+          for (const p of manual) {
+            const inst = await mt5Market.instrument(p.symbol)
+            exposure += p.volume * (inst.valuePerPoint ?? 0) * p.price_current
+          }
+          return { count: manual.length, exposure }
+        }
+      }
+    },
     alert: (a) => alerts.send(a),
     onChange: () => {
       if (tradingEmitPending) return
@@ -231,8 +349,35 @@ async function bootstrap() {
     for (const [sym, q] of Object.entries(market.snapshot().quotes)) marks[sym] = q.markPrice ?? q.lastPrice ?? undefined
     return marks
   }
-  const tradingOverview = async () => automation.overview(currentMarks())
-  void market.instruments().then((l) => (instrumentsCache = l)).catch(() => undefined)
+  const gold = new GoldService({
+    db,
+    conn: mt5Conn,
+    market: mt5Market,
+    automation,
+    strategies,
+    engine: (method, params) => engine.request(method, params, 30_000),
+    manualExchange: mt5ManualExchange,
+    botMagic: MT5_MAGIC,
+    manualMagic: MT5_MANUAL_MAGIC,
+    configured: () => integrations.isConfigured('mt5'),
+    onSymbolDetected: (symbol) => {
+      // charts default to the broker's own gold symbol when the saved one is not listed
+      const p = prefs()
+      if (p.defaultSymbolMt5 !== symbol && mt5Market.isSupported(p.defaultSymbolMt5) === false) {
+        setSetting(db, 'preferences', { ...getSetting<Partial<GeneralPreferences>>(db, 'preferences', {}), defaultSymbolMt5: symbol })
+      }
+    },
+    onChange: () => automation.notifyChange(),
+    log
+  })
+
+  const tradingOverview = async () => {
+    const broker = activeBroker()
+    const o = await automation.overview(currentMarks(), broker)
+    if (broker === 'mt5') o.live.account = mt5AccountInfo()
+    return o
+  }
+  void deltaMarket.instruments().then((l) => (instrumentsCache = l)).catch(() => undefined)
   automation.startScheduler()
 
   const updates = new UpdateService(
@@ -362,14 +507,27 @@ async function bootstrap() {
       next.pythonPath = p
     }
     if (o.welcomeSound !== undefined) next.welcomeSound = Boolean(o.welcomeSound)
+    if (o.broker !== undefined) next.broker = v.oneOf(o.broker, ['delta', 'mt5'] as const)
+    if (o.defaultSymbolMt5 !== undefined) {
+      const s = v.str(o.defaultSymbolMt5, 32).trim()
+      if (!/^[A-Za-z0-9._#+!-]{1,32}$/.test(s)) throw new UserError('validation_failed', 'Invalid symbol.', { defaultSymbolMt5: 'Invalid symbol' })
+      next.defaultSymbolMt5 = s
+    }
     if (o.defaultSymbol !== undefined) {
       const s = v.str(o.defaultSymbol, 32).trim().toUpperCase()
       if (!/^[A-Z0-9_]{2,32}$/.test(s)) throw new UserError('validation_failed', 'Invalid symbol.', { defaultSymbol: 'Invalid symbol' })
       next.defaultSymbol = s
     }
     const pythonChanged = next.pythonPath !== prefs().pythonPath
+    const brokerChanged = next.broker !== prefs().broker
     setSetting(db, 'preferences', next)
     if (pythonChanged) void engine.restart()
+    if (brokerChanged) {
+      audit(db, 'broker.selected', { broker: next.broker })
+      market.refresh()
+      emit('market:changed', market.snapshot())
+      void tradingOverview().then((ov) => emit('trading:changed', ov)).catch(() => undefined)
+    }
     return next
   })
   ipc.handle('settings:secretStorage', () => {
@@ -382,8 +540,9 @@ async function bootstrap() {
     const id = v.oneOf(o.id, INTEGRATION_IDS)
     const view = integrations.save({ id, config: v.strRecord(o.config ?? {}), secrets: v.strRecord(o.secrets ?? {}) })
     audit(db, 'integration.saved', { id })
-    if (id === 'delta' || id === 'marketdata') market.applySettings()
+    if (id === 'delta' || id === 'marketdata') deltaMarket.applySettings()
     if (id === 'delta') account.invalidate()
+    if (id === 'mt5') resetMt5()
     return view
   })
   ipc.handle('integrations:test', async (req) => {
@@ -406,8 +565,9 @@ async function bootstrap() {
     const id = v.oneOf(v.obj(req).id, INTEGRATION_IDS)
     audit(db, 'integration.cleared', { id })
     const view = integrations.clear(id)
-    if (id === 'delta' || id === 'marketdata') market.applySettings()
+    if (id === 'delta' || id === 'marketdata') deltaMarket.applySettings()
     if (id === 'delta') account.invalidate()
+    if (id === 'mt5') resetMt5()
     return view
   })
 
@@ -451,20 +611,34 @@ async function bootstrap() {
   ipc.handle('strategies:backtest', async (req) => {
     subscription.requireAccess('Backtesting')
     const o = v.obj(req)
-    const s = await strategies.get(v.str(o.id, 64))
+    return runBacktest(v.str(o.id, 64), o)
+  })
+  const runBacktest = async (id: string, o: Record<string, unknown>) => {
+    const s = await strategies.get(id)
     if (!s.validation.valid) throw new UserError('strategy_invalid', `Fix the strategy before backtesting: ${s.validation.errors[0]!.message}`)
     const tf = s.timeframe!
     const days = Math.round(v.num(o.days, 1, MAX_DAYS[tf]))
     const slippageBps = o.slippageBps === undefined ? 0 : v.num(o.slippageBps, 0, 500)
     const feeBps = o.feeBps === undefined ? s.definition.risk.feeBps : v.num(o.feeBps, 0, 100)
     const initialEquity = o.initialEquity === undefined ? 10_000 : v.num(o.initialEquity, 100, 1e9)
-    const candles = await market.candles(s.symbol, tf, days)
+    const venue = venueOf(s.definition)
+    const candles = await market.for(venue).candles(s.symbol, tf, days)
     if (candles.length < 30) throw new UserError('insufficient_data', `Only ${candles.length} candles are available for ${s.symbol} ${tf}; at least 30 are needed.`)
-    const result = await engine.request<{ metrics: BacktestMetrics; trades: BacktestTrade[]; equityCurve: [number, number][] }>('backtest_rules', { definition: s.definition, candles, feeBps, slippageBps, initialEquity })
+    // MT5: profit per price move in the account currency, lots, pips and the spread in the candles
+    let venueParams = {}
+    if (venue === 'mt5') {
+      const inst = await mt5Market.instrument(s.symbol)
+      const spec = sizingSpecOf(inst)
+      if (!spec || !inst.contractSize) throw new UserError('unsupported_symbol', `${s.symbol} has no contract size or tick value at your broker, so it cannot be backtested.`)
+      const commissionPerLot = o.commissionPerLot === undefined ? 0 : v.num(o.commissionPerLot, 0, 10_000)
+      // the broker's lot step, minimum and maximum apply as for live orders
+      venueParams = { pointValue: spec.valuePerPoint / inst.contractSize, unitsPerLot: inst.contractSize, pipSize: inst.pipSize ?? undefined, volumeStep: spec.volumeStep, volumeMin: spec.volumeMin, volumeMax: spec.volumeMax ?? undefined, commissionPerLot }
+    }
+    const result = await engine.request<{ metrics: BacktestMetrics; trades: BacktestTrade[]; equityCurve: [number, number][] }>('backtest_rules', { definition: s.definition, candles, feeBps, slippageBps, initialEquity, extraMetrics: true, ...venueParams })
     const runId = strategies.recordBacktest(s.id, s.symbol, tf, candles[0]!.time, candles.at(-1)!.time, result.metrics, s.version)
     audit(db, 'strategy.backtested', { id: s.id, version: s.version, runId, bars: candles.length, feeBps, slippageBps })
     return { runId, strategyId: s.id, symbol: s.symbol, timeframe: tf, candles, ...result }
-  })
+  }
 
   ipc.handle('engine:status', () => engine.getStatus())
   ipc.handle('engine:restart', () => engine.restart())
@@ -474,7 +648,12 @@ async function bootstrap() {
     return market.tickers(Array.isArray(symbols) ? symbols.slice(0, 50).map((s) => v.str(s, 32)) : undefined)
   })
   ipc.handle('market:symbols', async () => (await market.instruments()).map((i) => i.symbol))
-  ipc.handle('market:instruments', (req) => market.instruments(Boolean(req && v.obj(req).refresh)))
+  ipc.handle('market:instruments', (req) => {
+    const o = req ? v.obj(req) : {}
+    const refresh = Boolean(o.refresh)
+    // a strategy's own broker (the builder), otherwise the active one
+    return o.venue === 'mt5' || o.venue === 'delta' ? market.for(o.venue).instruments(refresh) : market.instruments(refresh)
+  })
   // Public market data (no credentials) is also available on the login screen.
   ipc.handle('market:snapshot', () => market.snapshot(), { auth: false })
   ipc.handle('market:watch', (req) => {
@@ -511,11 +690,23 @@ async function bootstrap() {
     const o = v.obj(req)
     if (v.str(o.confirmation, 40) !== 'ENABLE LIVE TRADING') throw new UserError('validation_failed', 'Type ENABLE LIVE TRADING to confirm.', { confirmation: 'Type ENABLE LIVE TRADING' })
     if (!(await auth.confirmPassword(v.str(o.password, 1024)))) throw new UserError('invalid_password', 'Incorrect password.', { password: 'Incorrect password' })
-    automation.setLive(true)
+    const broker = o.broker === 'mt5' || o.broker === 'delta' ? o.broker : activeBroker()
+    if (broker === 'mt5') {
+      // a real-money MT5 account needs one more explicit step: typing its account number;
+      // the account the terminal is logged in to now counts, else the last connection test's
+      const live = await mt5Conn.account().then((a) => ({ login: a.login, tradeMode: tradeModeOf(a) })).catch(() => null)
+      const acct = live ?? mt5AccountInfo()
+      if (!acct) throw new UserError('live_checks_failed', 'Run the MetaTrader 5 connection test first so TradePilot knows which account it would trade.')
+      if (acct.tradeMode !== 'demo' && v.optStr(o.accountConfirmation, 40)?.trim() !== String(acct.login)) {
+        throw new UserError('validation_failed', `This is a ${acct.tradeMode === 'contest' ? 'contest' : 'REAL-MONEY'} account. Type its account number (${acct.login}) to confirm.`, { accountConfirmation: `Type ${acct.login}` })
+      }
+    }
+    automation.setLive(true, broker)
     return tradingOverview()
   })
-  ipc.handle('trading:disableLive', async () => {
-    automation.setLive(false)
+  ipc.handle('trading:disableLive', async (req) => {
+    const o = req ? v.obj(req) : {}
+    automation.setLive(false, o.broker === 'mt5' || o.broker === 'delta' ? o.broker : activeBroker())
     return tradingOverview()
   })
   ipc.handle('trading:emergencyStop', async () => {
@@ -553,6 +744,7 @@ async function bootstrap() {
   })
 
   ipc.handle('account:summary', (req) => account.summary(Boolean(req && v.obj(req).refresh)))
+  ipc.handle('mt5:account', (req) => mt5Account.summary(Boolean(req && v.obj(req).refresh)))
   ipc.handle('account:orders', () => account.orders())
 
   // The AI proposes rules in a conversation; nothing is saved until the client reviews and confirms it in the UI.
@@ -562,6 +754,8 @@ async function bootstrap() {
     const provider = o.provider === undefined ? chooseAiProvider() : v.oneOf(o.provider, ['openai', 'anthropic'] as const)
     if (!integrations.isConfigured(provider)) throw new UserError('not_configured', `Configure ${provider === 'openai' ? 'OpenAI' : 'Anthropic Claude'} in Settings first.`)
     const base = o.baseStrategyId === undefined ? undefined : (await strategies.get(v.str(o.baseStrategyId, 64))).definition
+    // the strategy's own broker when modifying, otherwise the active broker
+    const venue: BrokerId = base ? venueOf(base) : o.venue === 'mt5' || o.venue === 'delta' ? o.venue : activeBroker()
     const raw = Array.isArray(o.messages) ? o.messages.slice(-20) : []
     const messages: ChatMessage[] = raw.map((m) => {
       const mo = v.obj(m)
@@ -570,8 +764,8 @@ async function bootstrap() {
     const key = integrations.secret(provider, 'apiKey')!
     const client = provider === 'openai' ? new OpenAiProvider(key) : new AnthropicProvider(key)
     const settings = aiSettings(integrations.config(provider), provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL)
-    const symbols = await market.instruments().then((l) => l.map((i) => i.symbol)).catch(() => [])
-    const turn = await interpretTurn(messages, client, usage, settings, symbols, base)
+    const symbols = await market.for(venue).instruments().then((l) => l.map((i) => i.symbol)).catch(() => [])
+    const turn = await interpretTurn(messages, client, usage, settings, symbols, base, venue)
     audit(db, 'ai.strategy_turn', { provider, model: turn.model, status: turn.status, modify: Boolean(base), tokens: turn.usage.inputTokens + turn.usage.outputTokens })
     return turn
   })
@@ -596,6 +790,103 @@ async function bootstrap() {
     const o = v.obj(req)
     const tf = v.oneOf(o.timeframe, TIMEFRAMES)
     return market.candles(v.str(o.symbol, 32), tf, Math.round(v.num(o.days, 1, MAX_DAYS[tf])))
+  })
+
+  // ---------- XAUUSD Gold Bot ----------
+  const goldSettingsArg = (x: unknown): GoldSettings => {
+    const o = v.obj(x)
+    const n = (k: string) => v.num(o[k], -1e12, 1e12)
+    const session = o.session === null ? null : v.obj(o.session)
+    return {
+      symbol: o.symbol === null || o.symbol === undefined || o.symbol === '' ? null : v.str(o.symbol, 32),
+      accountMode: v.oneOf(o.accountMode, ['demo', 'live'] as const),
+      timeframe: v.oneOf(o.timeframe, ['1m', '5m'] as const),
+      trendTimeframe: v.oneOf(o.trendTimeframe, ['15m', '30m', '1h'] as const),
+      direction: v.oneOf(o.direction, ['long', 'short', 'both'] as const),
+      entryStyle: v.oneOf(o.entryStyle, ['pullback', 'breakout', 'momentum'] as const),
+      useTrendFilter: Boolean(o.useTrendFilter),
+      useRsi: Boolean(o.useRsi),
+      useMacd: Boolean(o.useMacd),
+      useVwap: Boolean(o.useVwap),
+      useCandleConfirmation: Boolean(o.useCandleConfirmation),
+      lotMode: v.oneOf(o.lotMode, ['risk', 'fixed'] as const),
+      riskPercent: n('riskPercent'),
+      fixedLots: n('fixedLots'),
+      stopAtr: n('stopAtr'),
+      takeProfitR: n('takeProfitR'),
+      minRiskReward: n('minRiskReward'),
+      maxDailyLossPct: n('maxDailyLossPct'),
+      maxTradesPerDay: n('maxTradesPerDay'),
+      maxConsecutiveLosses: n('maxConsecutiveLosses'),
+      cooldownMinutes: n('cooldownMinutes'),
+      maxTradeMinutes: n('maxTradeMinutes'),
+      maxSpread: n('maxSpread'),
+      maxExtensionAtr: n('maxExtensionAtr'),
+      abnormalRangeAtr: n('abnormalRangeAtr'),
+      session: session ? { start: v.str(session.start, 5), end: v.str(session.end, 5) } : null,
+      events: (Array.isArray(o.events) ? o.events.slice(0, 200) : []).map((e) => {
+        const eo = v.obj(e)
+        return { start: v.str(eo.start, 40), end: v.str(eo.end, 40), label: v.str(eo.label, 80) }
+      }),
+      commissionPerLot: n('commissionPerLot')
+    }
+  }
+  ipc.handle('gold:status', (req) => gold.status(Boolean(req && v.obj(req).refresh)))
+  ipc.handle('gold:detectSymbol', () => gold.status(true))
+  ipc.handle('gold:saveSettings', async (req) => {
+    subscription.requireAccess('Automated trading')
+    const o = v.obj(req)
+    await gold.saveSettings(goldSettingsArg(o.settings), o.confirmLive === true)
+    return gold.status()
+  })
+  ipc.handle('gold:start', async () => {
+    subscription.requireAccess('Automated trading')
+    await gold.startBot()
+    return gold.status()
+  })
+  ipc.handle('gold:stop', async (req) => {
+    await gold.stopBot(Boolean(v.obj(req).closePosition))
+    return gold.status()
+  })
+  ipc.handle('gold:order', async (req) => {
+    subscription.requireAccess('Live trading')
+    const o = v.obj(req)
+    const order = await gold.manualOrder(v.oneOf(o.side, ['buy', 'sell'] as const), v.str(o.requestId, 64))
+    notifications.add({ category: 'trading', severity: order.state === 'rejected' ? 'warning' : 'info', title: `Manual ${order.side.toUpperCase()} ${order.state}`, body: `${order.volume} lots${order.avgPrice ? ` @ ${order.avgPrice}` : ''}${order.error ? ` — ${order.error}` : ''}`, native: false })
+    return { order, status: await gold.status() }
+  })
+  // closing and protecting positions stays possible without an active subscription
+  ipc.handle('gold:closePosition', async (req) => {
+    const o = v.obj(req)
+    await gold.closePosition(v.str(o.id, 80), o.confirmForeign === true)
+    return gold.status()
+  })
+  ipc.handle('gold:closeAll', async () => {
+    const r = await gold.closeAll()
+    return { ...r, status: await gold.status() }
+  })
+  ipc.handle('gold:modifyPosition', async (req) => {
+    const o = v.obj(req)
+    const level = (x: unknown) => (x === null || x === undefined ? null : v.num(x, 0, 1e9))
+    await gold.modifyPosition(v.str(o.id, 80), level(o.stopLoss), level(o.takeProfit))
+    return gold.status()
+  })
+  ipc.handle('gold:candles', (req) => gold.candles(v.oneOf(v.obj(req).timeframe, ['1m', '5m', '15m'] as const)))
+  ipc.handle('gold:backtest', async (req) => {
+    subscription.requireAccess('Backtesting')
+    const o = v.obj(req)
+    const synced = await gold.syncStrategy()
+    if (!synced.id || synced.problem) throw new UserError('strategy_invalid', synced.problem ?? 'The Gold strategy is not ready.')
+    // spread from the candles, the broker's commission per lot, slippage for fast moves and requotes
+    return runBacktest(synced.id, { days: o.days, slippageBps: o.slippageBps, commissionPerLot: gold.settings().commissionPerLot })
+  })
+  ipc.handle('gold:connect', async () => {
+    await gold.connect()
+    return gold.status(true)
+  })
+  ipc.handle('gold:disconnect', async () => {
+    await gold.disconnect()
+    return gold.status()
   })
 
   ipc.handle('paper:placeOrder', async (req) => {
@@ -664,6 +955,7 @@ async function bootstrap() {
     automation.stopScheduler()
     engine.stop()
     market.stop()
+    void mt5Client.shutdown()
   })
   return { updates, prefs }
 }

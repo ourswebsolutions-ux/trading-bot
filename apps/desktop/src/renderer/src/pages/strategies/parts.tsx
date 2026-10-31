@@ -1,4 +1,4 @@
-import type { Strategy } from '@shared/ipc'
+import { BROKER_LABEL, type Strategy } from '@shared/ipc'
 import {
   COMPARATOR_TEXT,
   INDICATORS,
@@ -7,6 +7,7 @@ import {
   describeStop,
   describeTarget,
   explainDefinition,
+  venueOf,
   type Operand,
   type RuleGroup,
   type StrategyDefinition,
@@ -41,9 +42,12 @@ export function GroupView({ g, d, empty }: { g: RuleGroup | null; d: StrategyDef
 export function RulesView({ d }: { d: StrategyDefinition }) {
   const long = d.direction === 'long' || d.direction === 'both'
   const short = d.direction === 'short' || d.direction === 'both'
+  const venue = venueOf(d)
+  const ccy = venue === 'mt5' ? ' (account currency)' : ''
   return (
     <div className="rules-view">
       <dl className="kv" style={{ gridTemplateColumns: '140px 1fr' }}>
+        <dt>Broker</dt><dd>{BROKER_LABEL[venue]}</dd>
         <dt>Instrument</dt><dd className="mono">{d.symbol || <span className="down">not set</span>}</dd>
         <dt>Timeframe</dt><dd>{d.timeframe ?? <span className="down">not set</span>}</dd>
         <dt>Direction</dt><dd>{d.direction ? { long: 'Buy (long) only', short: 'Sell short only', both: 'Long and short' }[d.direction] : <span className="down">not set</span>}</dd>
@@ -58,9 +62,9 @@ export function RulesView({ d }: { d: StrategyDefinition }) {
         <dl className="kv" style={{ gridTemplateColumns: '140px 1fr' }}>
           <dt>Stop-loss</dt><dd>{d.risk.stopLoss ? describeStop(d.risk.stopLoss) : <span className="down">not set</span>}</dd>
           <dt>Take-profit</dt><dd>{describeTarget(d.risk.takeProfit)}</dd>
-          <dt>Position size</dt><dd>{d.risk.sizing ? describeSizingFor(d.risk) : <span className="down">not set</span>}</dd>
-          <dt>Allocated capital</dt><dd>{typeof d.risk.allocatedCapitalUsd === 'number' ? `$${d.risk.allocatedCapitalUsd.toLocaleString('en-US')}` : 'not set (whole account equity)'}</dd>
-          <dt>Max daily loss</dt><dd>{describeDailyLoss(d.risk) !== 'not set' ? describeDailyLoss(d.risk) : <span className="down">not set</span>}</dd>
+          <dt>Position size</dt><dd>{d.risk.sizing ? describeSizingFor(d.risk, venue) : <span className="down">not set</span>}</dd>
+          <dt>Allocated capital</dt><dd>{typeof d.risk.allocatedCapitalUsd === 'number' ? (venue === 'mt5' ? `${d.risk.allocatedCapitalUsd.toLocaleString('en-US')}${ccy}` : `$${d.risk.allocatedCapitalUsd.toLocaleString('en-US')}`) : 'not set (whole account equity)'}</dd>
+          <dt>Max daily loss</dt><dd>{describeDailyLoss(d.risk, venue) !== 'not set' ? describeDailyLoss(d.risk, venue) : <span className="down">not set</span>}</dd>
           <dt>Max trades / day</dt><dd>{d.risk.maxTradesPerDay ?? <span className="down">not set</span>}</dd>
           <dt>Fee assumption</dt><dd>{d.risk.feeBps} bps per side (backtests)</dd>
         </dl>
@@ -98,15 +102,15 @@ export function ExplanationView({ d }: { d: StrategyDefinition }) {
 
 export function riskSummary(d: StrategyDefinition): string {
   const r = d.risk
-  const stop = r.stopLoss ? (r.stopLoss.type === 'percent' ? `SL ${r.stopLoss.value}%` : r.stopLoss.type === 'points' ? `SL ${r.stopLoss.value} pts` : `SL ${r.stopLoss.value}×ATR`) : 'no SL'
-  const tp = r.takeProfit ? (r.takeProfit.type === 'percent' ? `TP ${r.takeProfit.value}%` : r.takeProfit.type === 'points' ? `TP ${r.takeProfit.value} pts` : `TP ${r.takeProfit.value}R`) : 'no TP'
-  const size = r.sizing ? (r.sizing.type === 'percent_equity' ? `${r.sizing.value}% eq` : r.sizing.type === 'risk_percent' ? `risk ${r.sizing.value}%` : `${r.sizing.value} qty`) : 'no size'
+  const stop = r.stopLoss ? (r.stopLoss.type === 'percent' ? `SL ${r.stopLoss.value}%` : r.stopLoss.type === 'points' ? `SL ${r.stopLoss.value} pts` : r.stopLoss.type === 'pips' ? `SL ${r.stopLoss.value} pips` : `SL ${r.stopLoss.value}×ATR`) : 'no SL'
+  const tp = r.takeProfit ? (r.takeProfit.type === 'percent' ? `TP ${r.takeProfit.value}%` : r.takeProfit.type === 'points' ? `TP ${r.takeProfit.value} pts` : r.takeProfit.type === 'pips' ? `TP ${r.takeProfit.value} pips` : `TP ${r.takeProfit.value}R`) : 'no TP'
+  const size = r.sizing ? (r.sizing.type === 'percent_equity' ? `${r.sizing.value}% eq` : r.sizing.type === 'risk_percent' ? `risk ${r.sizing.value}%` : `${r.sizing.value} ${venueOf(d) === 'mt5' ? 'lots' : 'qty'}`) : 'no size'
   return `${stop} · ${tp} · ${size}`
 }
 
 export function limitsSummary(d: StrategyDefinition): string {
   const r = d.risk
-  const loss = [r.maxDailyLossPct != null ? `${r.maxDailyLossPct}%` : null, r.maxDailyLossUsd != null ? `$${r.maxDailyLossUsd}` : null].filter(Boolean).join(' / ') || '?'
+  const loss = [r.maxDailyLossPct != null ? `${r.maxDailyLossPct}%` : null, r.maxDailyLossUsd != null ? (venueOf(d) === 'mt5' ? `${r.maxDailyLossUsd}` : `$${r.maxDailyLossUsd}`) : null].filter(Boolean).join(' / ') || '?'
   return `max loss ${loss}/day · ${r.maxTradesPerDay ?? '?'} trades/day`
 }
 
@@ -114,6 +118,7 @@ export function StatusBadge({ s }: { s: Strategy }) {
   return (
     <span style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
       {s.status === 'enabled' ? <Badge tone="ok">Enabled</Badge> : <Badge>Disabled</Badge>}
+      {venueOf(s.definition) === 'mt5' && <Badge tone="info">MT5</Badge>}
       {!s.validation.valid && <Badge tone="warn">Needs attention</Badge>}
       {s.source === 'ai' && <Badge tone="info">AI-interpreted</Badge>}
       {s.source === 'converted' && <Badge>Converted</Badge>}

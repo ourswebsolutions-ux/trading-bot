@@ -1,5 +1,7 @@
 # Automated trading (Phase 4)
 
+> This page describes Delta Exchange. MetaTrader 5 uses the same engine, risk checks, duplicate prevention and emergency stop. It has its own live switch, broker-side SL/TP on the position, sizing in lots and pips, and its own reconciliation. See [MT5.md](MT5.md).
+
 ## How it works
 
 | Component | Responsibility |

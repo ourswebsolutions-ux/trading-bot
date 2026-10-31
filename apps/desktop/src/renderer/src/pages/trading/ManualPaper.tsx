@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { TIMEFRAMES } from '@shared/strategyRules'
 import type { PaperPosition, Timeframe } from '@shared/ipc'
 import { CandleChart } from '../../components/charts'
 import { PaywallBanner, useAccess } from '../../components/paywall'
@@ -8,15 +9,16 @@ import { dateTime, money, pct, price, qty } from '../../lib/format'
 import { useNow, useResource } from '../../lib/hooks'
 import { useLiveSeries, useMarketWatch } from '../../lib/market'
 import { effectiveState, FreshnessBadge, QuoteLine } from '../../components/market'
-import { useApp } from '../../lib/state'
+import { useBroker } from '../../lib/broker'
 
-const TF_DAYS: Record<Timeframe, number> = { '5m': 2, '15m': 5, '1h': 14, '4h': 45, '1d': 240 }
+const TF_DAYS: Record<Timeframe, number> = { '1m': 1, '5m': 2, '15m': 5, '30m': 10, '1h': 14, '4h': 45, '1d': 240 }
 
 export function ManualPaper() {
-  const { prefs } = useApp()
+  const { broker, label: brokerLabel, defaultSymbol } = useBroker()
   const toast = useToast()
   const { allowed } = useAccess()
-  const [symbol, setSymbol] = useState(prefs?.defaultSymbol ?? 'BTCUSD')
+  const [symbol, setSymbol] = useState(defaultSymbol)
+  useEffect(() => setSymbol(defaultSymbol), [defaultSymbol])
   const [tf, setTf] = useState<Timeframe>('15m')
   const [side, setSide] = useState<'buy' | 'sell'>('buy')
   const [quantity, setQuantity] = useState('0.01')
@@ -55,7 +57,7 @@ export function ManualPaper() {
   return (
     <div className="page">
       <Banner tone="info" icon="shield" title="Manual paper trading">
-        Orders on this tab are simulated. They fill at the current Delta Exchange mark price and never reach the exchange. Automated live trading is controlled on the Automation tab.
+        Orders on this tab are simulated. They fill at the current {brokerLabel} {broker === 'mt5' ? 'mid price' : 'mark price'} and never reach {broker === 'mt5' ? 'your broker' : 'the exchange'}. Automated live trading is controlled on the Automation tab.
       </Banner>
       <PaywallBanner feature="Paper trading" />
 
@@ -69,7 +71,7 @@ export function ManualPaper() {
               <QuoteLine q={quote} health={snap?.health} />
             </span>
           }
-          actions={<Segmented value={tf} onChange={setTf} options={(['5m', '15m', '1h', '4h', '1d'] as Timeframe[]).map((v) => ({ value: v, label: v }))} />}
+          actions={<Segmented value={tf} onChange={setTf} options={TIMEFRAMES.map((v) => ({ value: v, label: v }))} />}
         >
           {live.error ? <ErrorState message={live.error} onRetry={live.reload} /> : !live.series ? <Skeleton height={340} /> : <CandleChart candles={live.series.candles} height={340} />}
         </Panel>
@@ -83,7 +85,7 @@ export function ManualPaper() {
             }}
           >
             <Segmented className="side" value={side} onChange={setSide} options={[{ value: 'buy', label: 'Buy / Long', className: 'buy' }, { value: 'sell', label: 'Sell / Short', className: 'sell' }]} />
-            <Field label="Quantity" hint="Contract units of the underlying (e.g. BTC)" error={quantity && !qtyValid ? 'Enter a positive number' : undefined}>
+            <Field label="Quantity" hint={broker === 'mt5' ? 'Units of the base currency (100,000 = 1 standard lot on most forex pairs); P&L is in the quote currency' : 'Contract units of the underlying (e.g. BTC)'} error={quantity && !qtyValid ? 'Enter a positive number' : undefined}>
               <input className="input mono" inputMode="decimal" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
             </Field>
             <dl className="kv" style={{ gridTemplateColumns: '1fr auto' }}>

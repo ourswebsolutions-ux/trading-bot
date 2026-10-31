@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { AiPreferences, AiProviderId, GeneralPreferences, IntegrationId, IntegrationView } from '@shared/ipc'
+import { BROKER_LABEL, type AiPreferences, type AiProviderId, type BrokerId, type GeneralPreferences, type IntegrationId, type IntegrationView } from '@shared/ipc'
 import { INTEGRATION_META, IntegrationSection } from './Integrations'
 import { Icon, type IconName } from '../components/icons'
 import { Badge, Banner, Button, ConfirmDialog, ErrorState, Field, Panel, Progress, Skeleton, StatusDot, useToast } from '../components/ui'
@@ -12,7 +12,7 @@ import { ChangePasswordForm } from './Auth'
 type Tab = 'general' | 'ai' | 'security' | IntegrationId | 'updates' | 'about'
 
 function General() {
-  const { prefs, setPrefs, engine } = useApp()
+  const { prefs, setPrefs, engine, info } = useApp()
   const toast = useToast()
   const [draft, setDraft] = useState<GeneralPreferences | null>(prefs)
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -55,6 +55,16 @@ function General() {
             </Field>
           )}
         </div>
+        <div className="form-row">
+          <Field label="Active broker" error={errors.broker} hint="Prices, account, charts and new strategies use this broker. Running strategies keep trading on the broker they were created for.">
+            <select className="select" value={draft.broker} onChange={(e) => set('broker', e.target.value as BrokerId)}>
+              {(Object.keys(BROKER_LABEL) as BrokerId[]).map((b) => <option key={b} value={b}>{BROKER_LABEL[b]}{b === 'mt5' ? ' (forex, Windows)' : ' (crypto futures)'}</option>)}
+            </select>
+          </Field>
+        </div>
+        {draft.broker === 'mt5' && info && info.platform !== 'win32' && (
+          <Banner tone="warn" title="MetaTrader 5 needs Windows">The MT5 terminal and its Python package only run on Windows. On this computer MetaTrader 5 prices, accounts and trading are unavailable.</Banner>
+        )}
         <label className="check"><input type="checkbox" checked={draft.desktopNotifications} onChange={(e) => set('desktopNotifications', e.target.checked)} /><span>Show desktop notifications</span></label>
         <label className="check"><input type="checkbox" checked={draft.welcomeSound} onChange={(e) => set('welcomeSound', e.target.checked)} /><span>Play the welcome sound at start-up</span></label>
         <label className="check"><input type="checkbox" checked={draft.autoInstallUpdates} onChange={(e) => set('autoInstallUpdates', e.target.checked)} /><span>Install downloaded updates automatically while TradePilot is locked <span className="faint">— otherwise they install when you restart or quit</span></span></label>
@@ -199,7 +209,7 @@ function About() {
         <dt>Device ID</dt><dd className="mono">{info?.deviceId ?? 'not registered yet'}</dd>
         <dt>Data folder</dt><dd className="mono selectable" style={{ fontSize: 12 }}>{info?.dataPath}</dd>
         <dt>Trading engine</dt><dd>{engine?.state}{engine?.python ? ` · Python ${engine.python}, engine ${engine.engineVersion}` : ''}{engine?.message ? <div className="faint">{engine.message}</div> : null}</dd>
-        <dt>Live trading</dt><dd><Badge tone="warn">Off unless you enable it on the Trading page</Badge></dd>
+        <dt>Live trading</dt><dd><Badge tone="warn">Off unless you enable it on the Trading page (separately for each broker)</Badge></dd>
       </dl>
       <div className="btn-row" style={{ marginTop: 16 }}>
         <Button icon="folder" onClick={() => call('shell:openDataFolder').catch((err) => toast({ tone: 'bad', title: 'Could not open folder', body: errorMessage(err) }))}>Open data folder</Button>
@@ -251,7 +261,7 @@ export function Settings() {
           {item('updates', 'Updates', 'download')}
           {item('about', 'About', 'info')}
           <div className="group">Connections</div>
-          {(['delta', 'marketdata', 'openai', 'anthropic', 'smtp', 'whatsapp'] as IntegrationId[]).map((id) => item(id, INTEGRATION_META[id].title, INTEGRATION_META[id].icon, toneOf(id) ?? undefined))}
+          {(['delta', 'mt5', 'marketdata', 'openai', 'anthropic', 'smtp', 'whatsapp'] as IntegrationId[]).map((id) => item(id, INTEGRATION_META[id].title, INTEGRATION_META[id].icon, toneOf(id) ?? undefined))}
         </nav>
         <div>
           {tab === 'general' && <General />}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Strategy, Timeframe } from '@shared/ipc'
+import { BROKER_LABEL, type BrokerId, type Strategy, type Timeframe } from '@shared/ipc'
 import {
   COMPARATORS,
   COMPARATOR_TEXT,
@@ -8,6 +8,7 @@ import {
   TIMEFRAMES,
   emptyDefinition,
   suggestIndicatorId,
+  venueOf,
   type Comparator,
   type Condition,
   type IndicatorDef,
@@ -24,6 +25,7 @@ import { PaywallBanner, useAccess } from '../../components/paywall'
 import { Banner, Button, Field, Panel, Segmented, useToast } from '../../components/ui'
 import { call, errorMessage, fieldErrors } from '../../lib/api'
 import { useResource } from '../../lib/hooks'
+import { useBroker } from '../../lib/broker'
 import { useApp } from '../../lib/state'
 import { ExplanationView, ValidationList } from './parts'
 
@@ -129,20 +131,22 @@ function GroupEditor({ title, hint, group, onChange, d, errorsAt, optional }: {
   )
 }
 
-const STOP_TYPES: { value: StopLoss['type']; label: string; unit: string }[] = [
+const STOP_TYPES: { value: StopLoss['type']; label: string; unit: string; mt5Only?: boolean }[] = [
+  { value: 'pips', label: 'Pips', unit: 'pips', mt5Only: true },
   { value: 'percent', label: 'Percent of entry price', unit: '%' },
   { value: 'points', label: 'Price points', unit: 'pts' },
   { value: 'atr', label: 'Multiple of ATR(14)', unit: '× ATR' }
 ]
-const TARGET_TYPES: { value: TakeProfit['type']; label: string }[] = [
+const TARGET_TYPES: { value: TakeProfit['type']; label: string; mt5Only?: boolean }[] = [
+  { value: 'pips', label: 'Pips', mt5Only: true },
   { value: 'percent', label: 'Percent of entry price' },
   { value: 'points', label: 'Price points' },
   { value: 'risk_multiple', label: 'Multiple of stop distance (R)' }
 ]
-const SIZING_TYPES: { value: Sizing['type']; label: string }[] = [
+const sizingTypes = (venue: BrokerId): { value: Sizing['type']; label: string }[] => [
   { value: 'percent_equity', label: 'Percent of equity' },
   { value: 'risk_percent', label: 'Risk % of equity at the stop' },
-  { value: 'fixed_quantity', label: 'Fixed quantity (contracts)' }
+  { value: 'fixed_quantity', label: venue === 'mt5' ? 'Fixed lots' : 'Fixed quantity (contracts)' }
 ]
 
 export function Builder({ strategy, initial, source, aiProvider, aiText, onClose, onSaved }: {
@@ -157,12 +161,22 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
 }) {
   const toast = useToast()
   const { prefs } = useApp()
+  const active = useBroker()
   const { allowed } = useAccess()
-  const [d, setD] = useState<StrategyDefinition>(() => structuredClone(initial ?? strategy?.definition ?? emptyDefinition(prefs?.defaultSymbol ?? 'BTCUSD')))
+  const [d, setD] = useState<StrategyDefinition>(() => structuredClone(initial ?? strategy?.definition ?? emptyDefinition(active.defaultSymbol, active.broker)))
+  const venue = venueOf(d)
+  const ccy = venue === 'mt5' ? 'account currency' : 'USD'
   const [validation, setValidation] = useState<ValidationResult | null>(null)
   const [saving, setSaving] = useState<null | 'save' | 'enable'>(null)
   const [error, setError] = useState<string | null>(null)
-  const instruments = useResource(() => call('market:instruments', {}), [])
+  const instruments = useResource(() => call('market:instruments', { venue }), [venue])
+  // a new strategy may switch broker: the symbol and broker-only settings start over for it
+  const switchVenue = (next: BrokerId) =>
+    setD((x) => {
+      const base = emptyDefinition(next === 'mt5' ? prefs?.defaultSymbolMt5 || 'EURUSD' : prefs?.defaultSymbol || 'BTCUSD', next)
+      const pipsOk = (t: { type: string } | null) => (next === 'mt5' || t?.type !== 'pips' ? t : null)
+      return { ...x, venue: base.venue, symbol: base.symbol, risk: { ...x.risk, feeBps: base.risk.feeBps, stopLoss: pipsOk(x.risk.stopLoss) as StopLoss | null, takeProfit: pipsOk(x.risk.takeProfit) as TakeProfit | null } }
+    })
   const set = <K extends keyof StrategyDefinition>(k: K, val: StrategyDefinition[K]) => setD((x) => ({ ...x, [k]: val }))
   const setRisk = <K extends keyof StrategyDefinition['risk']>(k: K, val: StrategyDefinition['risk'][K]) => setD((x) => ({ ...x, risk: { ...x.risk, [k]: val } }))
 
@@ -241,7 +255,12 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
                 <Field label="Name" error={fieldErr('name')}>
                   <input className={`input ${fieldErr('name') ? 'invalid' : ''}`} value={d.name} maxLength={80} onChange={(e) => set('name', e.target.value)} placeholder="e.g. BTC RSI dip buyer" />
                 </Field>
-                <Field label="Instrument" error={fieldErr('symbol')} hint={instruments.error ?? 'Live perpetuals in your Delta Exchange region'}>
+                <Field label="Broker" hint={strategy ? 'A saved strategy stays on its broker; create a new one for another broker.' : 'Where this strategy gets prices and trades.'}>
+                  <select className="select" value={venue} disabled={Boolean(strategy)} onChange={(e) => switchVenue(e.target.value as BrokerId)}>
+                    {(Object.keys(BROKER_LABEL) as BrokerId[]).map((b) => <option key={b} value={b}>{BROKER_LABEL[b]}</option>)}
+                  </select>
+                </Field>
+                <Field label="Instrument" error={fieldErr('symbol')} hint={instruments.error ?? (venue === 'mt5' ? 'Symbols offered by your MetaTrader 5 broker' : 'Live perpetuals in your Delta Exchange region')}>
                   <select className={`select mono ${fieldErr('symbol') ? 'invalid' : ''}`} value={d.symbol} onChange={(e) => set('symbol', e.target.value)}>
                     {!d.symbol && <option value="">Choose…</option>}
                     {symbolOptions.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -309,7 +328,7 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
                 <Field label="Stop-loss" error={fieldErr('risk.stopLoss') ?? fieldErr('risk.stopLoss.type')}>
                   <select className={`select ${fieldErr('risk.stopLoss') ? 'invalid' : ''}`} value={d.risk.stopLoss?.type ?? ''} onChange={(e) => setRisk('stopLoss', e.target.value ? { type: e.target.value as StopLoss['type'], value: d.risk.stopLoss?.value ?? Number.NaN } : null)}>
                     <option value="">Choose…</option>
-                    {STOP_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    {STOP_TYPES.filter((t) => !t.mt5Only || venue === 'mt5').map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                   </select>
                 </Field>
                 <Field label={`Stop distance${d.risk.stopLoss ? ` (${STOP_TYPES.find((t) => t.value === d.risk.stopLoss!.type)!.unit})` : ''}`} error={fieldErr('risk.stopLoss.value')}>
@@ -318,7 +337,7 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
                 <Field label="Take-profit" error={fieldErr('risk.takeProfit.type')} hint="Optional">
                   <select className="select" value={d.risk.takeProfit?.type ?? ''} onChange={(e) => setRisk('takeProfit', e.target.value ? { type: e.target.value as TakeProfit['type'], value: d.risk.takeProfit?.value ?? Number.NaN } : null)}>
                     <option value="">None</option>
-                    {TARGET_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    {TARGET_TYPES.filter((t) => !t.mt5Only || venue === 'mt5').map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                   </select>
                 </Field>
                 <Field label="Take-profit distance" error={fieldErr('risk.takeProfit.value')}>
@@ -327,25 +346,25 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
                 <Field label="Position sizing" error={fieldErr('risk.sizing') ?? fieldErr('risk.sizing.type')}>
                   <select className={`select ${fieldErr('risk.sizing') ? 'invalid' : ''}`} value={d.risk.sizing?.type ?? ''} onChange={(e) => setRisk('sizing', e.target.value ? { type: e.target.value as Sizing['type'], value: d.risk.sizing?.value ?? Number.NaN } : null)}>
                     <option value="">Choose…</option>
-                    {SIZING_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    {sizingTypes(venue).map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                   </select>
                 </Field>
-                <Field label="Size" error={fieldErr('risk.sizing.value')}>
+                <Field label={d.risk.sizing?.type === 'fixed_quantity' && venue === 'mt5' ? 'Lots' : 'Size'} error={fieldErr('risk.sizing.value')} hint={d.risk.sizing?.type === 'fixed_quantity' && venue === 'mt5' ? 'e.g. 0.10; rounded down to the symbol’s volume step' : undefined}>
                   <NumInput value={d.risk.sizing?.value ?? null} invalid={!!fieldErr('risk.sizing.value')} onChange={(n) => d.risk.sizing && setRisk('sizing', { ...d.risk.sizing, value: n ?? Number.NaN })} />
                 </Field>
                 <Field label="Maximum daily loss (% of equity)" error={fieldErr('risk.maxDailyLossPct')}>
                   <NumInput value={d.risk.maxDailyLossPct} invalid={!!fieldErr('risk.maxDailyLossPct')} onChange={(n) => setRisk('maxDailyLossPct', n)} />
                 </Field>
-                <Field label="Maximum daily loss (USD)" error={fieldErr('risk.maxDailyLossUsd')} hint="Optional; set this, the percent limit, or both">
+                <Field label={`Maximum daily loss (${ccy})`} error={fieldErr('risk.maxDailyLossUsd')} hint="Optional; set this, the percent limit, or both">
                   <NumInput value={d.risk.maxDailyLossUsd ?? null} invalid={!!fieldErr('risk.maxDailyLossUsd')} onChange={(n) => setRisk('maxDailyLossUsd', n)} />
                 </Field>
-                <Field label="Allocated capital (USD)" error={fieldErr('risk.allocatedCapitalUsd')} hint="Optional; base for percent sizing">
+                <Field label={`Allocated capital (${ccy})`} error={fieldErr('risk.allocatedCapitalUsd')} hint="Optional; base for percent sizing">
                   <NumInput value={d.risk.allocatedCapitalUsd ?? null} invalid={!!fieldErr('risk.allocatedCapitalUsd')} onChange={(n) => setRisk('allocatedCapitalUsd', n)} />
                 </Field>
                 <Field label="Maximum trades per day" error={fieldErr('risk.maxTradesPerDay')}>
                   <NumInput value={d.risk.maxTradesPerDay} invalid={!!fieldErr('risk.maxTradesPerDay')} onChange={(n) => setRisk('maxTradesPerDay', n)} />
                 </Field>
-                <Field label="Fee assumption (bps per side)" error={fieldErr('risk.feeBps')} hint="Used by backtests only">
+                <Field label="Fee assumption (bps per side)" error={fieldErr('risk.feeBps')} hint={venue === 'mt5' ? 'Broker commission for backtests; the spread comes from candle data' : 'Used by backtests only'}>
                   <NumInput value={d.risk.feeBps} invalid={!!fieldErr('risk.feeBps')} onChange={(n) => setRisk('feeBps', n ?? Number.NaN)} />
                 </Field>
               </div>

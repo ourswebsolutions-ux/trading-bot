@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { audit, type Db } from './db.js'
 import { UserError } from './errors.js'
 import type { PaperOrder, PaperPosition } from '../shared/ipc.js'
+import { SYMBOL_PATTERN } from '../shared/strategyRules.js'
 
 interface OrderRow {
   id: string
@@ -62,7 +63,7 @@ export class PaperBroker {
   }
 
   async place(symbol: string, side: 'buy' | 'sell', quantity: number): Promise<PaperOrder> {
-    if (!/^[A-Z0-9_]{2,32}$/.test(symbol)) throw new UserError('validation_failed', 'Choose a symbol.', { symbol: 'Required' })
+    if (!SYMBOL_PATTERN.delta.test(symbol) && !SYMBOL_PATTERN.mt5.test(symbol)) throw new UserError('validation_failed', 'Choose a symbol.', { symbol: 'Required' })
     if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1e9) throw new UserError('validation_failed', 'Quantity must be a positive number.', { quantity: 'Must be > 0' })
     const price = await this.markPrice(symbol)
     const order: PaperOrder = { id: randomUUID(), symbol, side, quantity, fillPrice: price, createdAt: new Date().toISOString() }

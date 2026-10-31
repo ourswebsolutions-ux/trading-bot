@@ -124,7 +124,7 @@ describe('strategy storage', () => {
     db.prepare(`INSERT INTO strategies (id, name, symbol, timeframe, type, params, risk, allow_short, status, notes, created_at, updated_at) VALUES ('s1','Trend','BTCUSD','1h','ema_cross','{"fast":12,"slow":26}','{"positionPct":10,"stopLossPct":2,"takeProfitPct":4,"feeBps":5}',0,'paper','',datetime('now'),datetime('now'))`).run()
     db.prepare(`INSERT INTO strategies (id, name, symbol, timeframe, type, params, risk, allow_short, status, notes, created_at, updated_at) VALUES ('s2','Trend','BTCUSD','1h','rsi_reversion','{"period":14,"oversold":30,"overbought":70}','{"positionPct":10,"stopLossPct":2,"takeProfitPct":4,"feeBps":5}',0,'archived','',datetime('now'),datetime('now'))`).run()
     db.prepare(`INSERT INTO backtest_runs VALUES ('b1','s1','BTCUSD','1h',1,2,'{}',datetime('now'))`).run()
-    assert.deepEqual(migrate(db), [3, 4, 5])
+    assert.deepEqual(migrate(db), [3, 4, 5, 6, 7])
     const rows = db.prepare('SELECT id, name, status, source, definition FROM strategies ORDER BY id').all() as { id: string; name: string; status: string; source: string; definition: string }[]
     assert.deepEqual(rows.map((r) => [r.id, r.name, r.status, r.source]), [['s1', 'Trend', 'disabled', 'converted'], ['s2', 'Trend (2)', 'disabled', 'converted']])
     assert.equal(JSON.parse(rows[0]!.definition).indicators[0].kind, 'ema')
