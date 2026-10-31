@@ -1,11 +1,11 @@
 # TradePilot
 
-Desktop trading research and paper-trading terminal (Electron + React + TypeScript) with a Python strategy engine and a subscription backend (Fastify + SQLite). **Phase 2** added real-time Delta Exchange market data and the provider integrations (Delta Exchange, OpenAI, Anthropic Claude, SMTP, WhatsApp Business). **Phase 3** adds the rule-based Strategy Builder, AI strategy interpretation (OpenAI or Claude) with clarification questions and confirmation before saving, and email-only subscription approval. **Phase 4** adds automated trading: a Python decision engine runs enabled strategies on live Delta Exchange data in paper or live mode, with account risk limits, duplicate-order prevention, exchange reconciliation and an emergency stop. Live orders stay off until you enable them after configuration and risk checks — see [docs/TRADING.md](docs/TRADING.md). **Phase 5** makes strategy creation prompt-first: write the strategy in plain language, answer the AI's questions, review TradePilot's own validation and explanation, confirm; changes are made the same way and saved as versions, with backtests (fees + slippage) and simulated paper trading — see [docs/STRATEGIES.md](docs/STRATEGIES.md). **XAUUSD Gold Scalper** (home page): short-term gold trading on MetaTrader 5 with automatic gold-symbol detection, an M15-trend / M1–M5-entry scalping strategy, scalping risk controls, demo/live modes, manual orders and backtests — see [docs/GOLD.md](docs/GOLD.md). **MetaTrader 5** (Windows only) can be used next to Delta Exchange: choose the active broker, with lots, pips, bid/ask spread and a separate live switch per broker. It is not yet verified against a real terminal — see [docs/MT5.md](docs/MT5.md).
+Desktop trading research and paper-trading terminal (Electron + React + TypeScript) with a Python strategy engine. **No subscription:** every feature is available without a plan or trial, and the app contacts no TradePilot server. **Phase 2** added real-time Delta Exchange market data and the provider integrations (Delta Exchange, OpenAI, Anthropic Claude, SMTP, WhatsApp Business). **Phase 3** adds the rule-based Strategy Builder, AI strategy interpretation (OpenAI or Claude) with clarification questions and confirmation before saving. **Phase 4** adds automated trading: a Python decision engine runs enabled strategies on live Delta Exchange data in paper or live mode, with account risk limits, duplicate-order prevention, exchange reconciliation and an emergency stop. Live orders stay off until you enable them after configuration and risk checks — see [docs/TRADING.md](docs/TRADING.md). **Phase 5** makes strategy creation prompt-first: write the strategy in plain language, answer the AI's questions, review TradePilot's own validation and explanation, confirm; changes are made the same way and saved as versions, with backtests (fees + slippage) and simulated paper trading — see [docs/STRATEGIES.md](docs/STRATEGIES.md). **XAUUSD Gold Scalper** (home page): short-term gold trading on MetaTrader 5 with automatic gold-symbol detection, an M15-trend / M1–M5-entry scalping strategy, scalping risk controls, demo/live modes, manual orders and backtests — see [docs/GOLD.md](docs/GOLD.md). **MetaTrader 5** (Windows only) can be used next to Delta Exchange: choose the active broker, with lots, pips, bid/ask spread and a separate live switch per broker. It is not yet verified against a real terminal — see [docs/MT5.md](docs/MT5.md).
 
 ```
 apps/desktop    Electron app: main process (SQLite, auth, secrets, updater, engine bridge) + React renderer
-apps/server     Subscription API + emailed payment review pages (single-use links; no admin dashboard)
-packages/shared Wire contracts, validation, password hashing, entitlement signing (Ed25519)
+apps/server     Former subscription server (no longer used by the desktop app; kept for reference)
+packages/shared Shared helpers (SMTP, validation, password hashing)
 engine          Python engine: indicators, strategy validation, deterministic backtester (stdio JSON-RPC)
 docs            SERVER.md, RELEASING.md, INTEGRATIONS.md, TRADING.md (automation, API permissions, testnet, emergency stop)
 ```
@@ -24,49 +24,36 @@ Installers for Windows, Linux (AppImage, .deb) and macOS are on the [Releases pa
 
 ```bash
 npm install
-npm run dev        # first run creates dev keys + .env files, starts the server, waits for it, then opens the desktop app
+npm run dev        # opens the desktop app with hot reload
 ```
 
-`npm run dev` prefixes output with `[server]` / `[desktop]`, and Ctrl+C stops both server and app (and everything they started). If port 8787 is taken — usually by a server left over from an earlier run, possibly started with `sudo` — it says so instead of starting; `PORT=8899 npm run dev` uses another port. It works from VS Code's terminal (it strips `ELECTRON_RUN_AS_NODE`). Don't run it with `sudo`.
-
-To enable payments locally, create the review passphrase once: `npm run review:passphrase -w @tradepilot/server -- --write` (stores only its hash in `apps/server/.env`), then restart `npm run dev`. In the app, configure Settings → SMTP Email: payment requests are emailed from the client's own account to `ADMIN_NOTIFY_EMAIL` (default `ourswebsolutions@gmail.com`) and confirmed or cancelled from the links in that email with the passphrase. No administrator account, dashboard or server SMTP is needed.
-
-Separate terminals still work: `npm run dev:server` and `npm run dev:desktop`. The first desktop launch asks you to create a password; for automated dev setups you may set `TRADEPILOT_DEV_INITIAL_PASSWORD` (development builds only, must pass the policy, must be changed at first sign-in). There is no built-in default password.
+`npm run dev` works from VS Code's terminal (it strips `ELECTRON_RUN_AS_NODE`); Ctrl+C stops it. Don't run it with `sudo`. The first desktop launch asks you to create a password; for automated dev setups you may set `TRADEPILOT_DEV_INITIAL_PASSWORD` (development builds only, must pass the policy, must be changed at first sign-in). There is no built-in default password.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `npm run typecheck` | TypeScript checks for shared, server, desktop (main + renderer) |
-| `npm test` | Server tests, desktop tests (incl. desktop↔server over real HTTP), Python engine tests |
+| `npm test` | Server tests (the unused former subscription server), desktop tests, Python engine tests |
 | `npm run test:e2e` | Builds the desktop app and drives it through every section with Playwright (needs network + python3) |
 | `npm run test:live` | Live integration tests against real providers. Delta public data always runs; credentialed checks run only when their env vars are set (see docs/INTEGRATIONS.md) |
-| `npm run build` | Server bundle (`apps/server/dist`) and desktop bundle (`apps/desktop/out`) |
+| `npm run build` | Desktop bundle (`apps/desktop/out`) and the former server's bundle |
 | `npm run package:desktop` | Installers for the current OS into `apps/desktop/release/<version>/` |
-| `npm start -w @tradepilot/server` | Run the built server (`node dist/server.js`) |
-| `npm run db:migrate -w @tradepilot/server` / `db:backup` | Apply migrations / take an online backup |
-| `npm run keys:generate -w @tradepilot/server -- --out <dir>` | Generate the production entitlement key pair |
 
 ## Configuration
 
-**Server** — environment variables, documented in [`apps/server/.env.example`](apps/server/.env.example): `PUBLIC_BASE_URL` (HTTPS in production), `DATA_DIR`, `ENTITLEMENT_PRIVATE_KEY_FILE` (required in production), `ADMIN_NOTIFY_EMAIL`, `SMTP_HOST/PORT/SECURE/REQUIRE_TLS/USER/PASSWORD_FILE/FROM`, `TRUST_PROXY`, `BACKUP_INTERVAL_HOURS`, `BACKUP_RETENTION`. Deployment details: [docs/SERVER.md](docs/SERVER.md).
-
-**Desktop build** — read at build time from `apps/desktop/.env` or CI env ([`.env.example`](apps/desktop/.env.example)):
+**Desktop build** — optional, at packaging time:
 
 | Variable | Purpose |
 |---|---|
-| `MAIN_VITE_API_BASE_URL` | Subscription server origin. Packaged builds require `https://`. |
-| `MAIN_VITE_ENTITLEMENT_PUBLIC_KEY` | Server's Ed25519 public key (base64 SPKI). Pinned in the app; status tokens signed by any other key are rejected. |
 | `TRADEPILOT_UPDATE_URL` | HTTPS base URL of the release feed (packaging time). Without it, builds have no update feed and say so. |
 
 User API credentials (Delta Exchange, MetaTrader 5, OpenAI, Anthropic, SMTP, WhatsApp) are entered in **Settings → Connections**, encrypted with the OS keychain (Electron `safeStorage`) and never sent to the renderer or logs.
 
 ## How access works
 
+- **No subscription or trial.** Every feature is available; nothing is checked against a server.
 - **Local login** (password only) protects the app on this computer. Hash: scrypt (N=2¹⁵, r=8, p=1). Five free attempts, then lockouts of 30 s doubling to 15 min, persisted across restarts. Auto-lock on idle, OS lock or sleep. Forgotten password → "Reset" wipes local data only.
-- **Subscription authorization** is decided by the server. On first unlock the app registers the machine (salted SHA-256 of the OS machine ID); the 72-hour trial is created server-side once per machine, so reinstalling, deleting data or changing the clock does not reset it.
-- The server returns an Ed25519-signed entitlement (default 12 h offline validity, never past the trial/plan end). The main process checks the signature, device, expiry and clock rollback before every paid action (create/edit strategies, backtests, paper orders). Subscription info, plans and payment history are always available.
-- Payments are manual: the client submits a transaction ID + screenshot; the app emails the business address (from the client's own SMTP account) with single-use, expiring **Confirm Payment** and **Cancel Request** links. Each opens a confirmation page (opening changes nothing) where the decision is submitted explicitly with the review passphrase; there are no administrator accounts or dashboard. Approval is transactional and idempotent; duplicate transaction IDs, a second pending request, replayed links and conflicting decisions are rejected. Details: [docs/SERVER.md](docs/SERVER.md#5-payment-approval-by-email-no-administrator-dashboard).
 
 ## Strategies (Phases 3 and 5)
 

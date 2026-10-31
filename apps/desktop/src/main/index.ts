@@ -4,7 +4,6 @@ import { app, BrowserWindow, dialog, Notification, powerMonitor, safeStorage, se
 import { audit, getSetting, openDatabase, setSetting, type Db } from './db.js'
 import { EngineBridge } from './engine.js'
 import { UserError } from './errors.js'
-import { machineFingerprint } from './fingerprint.js'
 import { AiUsageTracker } from './ai/provider.js'
 import { AnthropicProvider } from './ai/anthropic.js'
 import { OpenAiProvider } from './ai/openai.js'
@@ -28,9 +27,7 @@ import { NotificationCenter } from './notifications.js'
 import { PaperBroker } from './paper.js'
 import { SecretStore, type SecretCipher } from './secrets.js'
 import { StrategyStore } from './strategies.js'
-import { SubscriptionService } from './subscription.js'
 import { UpdateService } from './updater.js'
-import { loadDesktopConfig } from './config.js'
 import type { AiPreferences, BacktestMetrics, BacktestTrade, BrokerId, ChatMessage, EventContract, EventName, GeneralPreferences, Instrument, IntegrationId, Timeframe } from '../shared/ipc.js'
 import { BrokerMarkets } from './brokers/markets.js'
 import { Mt5AccountService, tradeModeOf } from './mt5/account.js'
@@ -108,7 +105,6 @@ const cipher: SecretCipher = {
 async function bootstrap() {
   const userData = app.getPath('userData')
   const db: Db = openDatabase(path.join(userData, 'tradepilot.sqlite'))
-  const config = loadDesktopConfig()
   const prefs = (): GeneralPreferences => ({ ...DEFAULT_PREFS, ...getSetting<Partial<GeneralPreferences>>(db, 'preferences', {}) })
 
   const auth = new LocalAuth(db)
@@ -194,32 +190,6 @@ async function bootstrap() {
       if (prefs().desktopNotifications && Notification.isSupported()) new Notification({ title, body, silent: false }).show()
     }
   )
-
-  const subscription = new SubscriptionService({
-    db,
-    secrets,
-    apiBaseUrl: config.apiBaseUrl,
-    configurationError: config.configurationError,
-    publicKey: config.entitlementPublicKey,
-    appVersion: app.getVersion(),
-    platform: process.platform,
-    fingerprint: machineFingerprint,
-    onRemoteNotification: (n) => {
-      const severity = n.kind === 'payment_approved' ? 'success' : n.kind === 'payment_cancelled' ? 'warning' : 'info'
-      notifications.add({ category: 'subscription', severity, title: n.title, body: n.body, remoteId: n.id, createdAt: n.createdAt })
-    },
-    // payment requests go out through the client's own SMTP connection (password in the OS keychain)
-    clientEmail: {
-      problem: () =>
-        integrations.isConfigured('smtp')
-          ? null
-          : 'Set up your email connection first: open Settings → SMTP Email, enter your mail server and sign-in, and send a test email. TradePilot sends your payment request to ourswebsolutions@gmail.com from your own email account.',
-      address: () => /<?([^<>\s]+@[^<>\s]+)>?\s*$/.exec(integrations.config('smtp').from ?? '')?.[1] ?? null,
-      send: async (m) => {
-        await sendSmtp(smtpSettings(integrations.config('smtp'), integrations.secret('smtp', 'password')), m)
-      }
-    }
-  })
 
   const paper = new PaperBroker(db, (s) => market.markPrice(s))
   const strategies = new StrategyStore(db, async (venue) => ({ instruments: await market.for(venue).instruments().then((l) => l.map((i) => i.symbol)).catch(() => null) }))
@@ -412,7 +382,6 @@ async function bootstrap() {
   const afterUnlock = () => {
     lastActivity = Date.now()
     emit('auth:changed', auth.status())
-    void subscription.refresh().then((view) => emit('subscription:changed', view))
   }
 
   ipc.handle('app:info', () => ({
@@ -420,9 +389,7 @@ async function bootstrap() {
     version: app.getVersion(),
     platform: `${process.platform}-${process.arch}`,
     packaged: app.isPackaged,
-    dataPath: userData,
-    apiBaseUrl: config.apiBaseUrl || null,
-    deviceId: subscription.deviceId
+    dataPath: userData
   }), { auth: false })
   ipc.handle('auth:status', () => auth.status(), { auth: false })
   ipc.handle('auth:setup', async (req) => {
@@ -446,7 +413,7 @@ async function bootstrap() {
   })
   ipc.handle('auth:resetApplication', async (req) => {
     if (v.str(v.obj(req).confirmation, 100) !== 'RESET') throw new UserError('validation_failed', 'Type RESET to confirm.', { confirmation: 'Type RESET' })
-    // Wipes local data only. Trial and subscription live on the server and are restored on next sign-in.
+    // Wipes all local data on this computer.
     engine.stop()
     db.close()
     rmSync(path.join(userData, 'tradepilot.sqlite'), { force: true })
@@ -459,38 +426,6 @@ async function bootstrap() {
   }, { auth: false })
   ipc.handle('auth:activity', () => {
     lastActivity = Date.now()
-  })
-
-  ipc.handle('subscription:view', () => subscription.view())
-  ipc.handle('subscription:refresh', async () => {
-    const view = await subscription.refresh()
-    emit('subscription:changed', view)
-    return view
-  })
-  ipc.handle('subscription:plans', () => subscription.plans())
-  ipc.handle('subscription:requests', () => subscription.requests())
-  ipc.handle('subscription:pickScreenshot', async () => {
-    const res = await dialog.showOpenDialog(mainWindow!, {
-      title: 'Select payment screenshot',
-      properties: ['openFile'],
-      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
-    })
-    if (res.canceled || !res.filePaths[0]) return null
-    return subscription.loadScreenshot(res.filePaths[0])
-  })
-  ipc.handle('subscription:submit', async (req) => {
-    const o = v.obj(req)
-    const created = await subscription.submit({
-      planCode: v.str(o.planCode, 20),
-      transactionId: v.str(o.transactionId, 100),
-      contactEmail: v.optStr(o.contactEmail, 254),
-      note: v.optStr(o.note, 600),
-      screenshotId: v.str(o.screenshotId, 64)
-    })
-    audit(db, 'subscription.payment_submitted', { requestId: created.id, plan: created.planCode })
-    notifications.add({ category: 'subscription', severity: 'info', title: 'Payment request submitted', body: `Request ${created.id.slice(0, 8)} is pending administrator review.`, native: false })
-    emit('subscription:changed', subscription.view())
-    return created
   })
 
   ipc.handle('settings:getPreferences', () => prefs())
@@ -581,7 +516,6 @@ async function bootstrap() {
   ipc.handle('strategies:get', (req) => strategies.get(v.str(v.obj(req).id, 64)))
   ipc.handle('strategies:validate', (req) => strategies.validate(definitionArg(v.obj(req).definition)))
   ipc.handle('strategies:save', (req) => {
-    subscription.requireAccess('Editing strategies')
     const o = v.obj(req)
     const source = o.source === 'ai' ? 'ai' : 'manual'
     return strategies.save(v.optStr(o.id, 64), definitionArg(o.definition), {
@@ -596,7 +530,6 @@ async function bootstrap() {
   ipc.handle('strategies:setEnabled', (req) => {
     const o = v.obj(req)
     const enabled = o.enabled === true
-    if (enabled) subscription.requireAccess('Enabling strategies')
     return strategies.setEnabled(v.str(o.id, 64), enabled)
   })
   ipc.handle('strategies:delete', (req) => {
@@ -605,11 +538,9 @@ async function bootstrap() {
     return { id }
   })
   ipc.handle('strategies:duplicate', (req) => {
-    subscription.requireAccess('Creating strategies')
     return strategies.duplicate(v.str(v.obj(req).id, 64))
   })
   ipc.handle('strategies:backtest', async (req) => {
-    subscription.requireAccess('Backtesting')
     const o = v.obj(req)
     return runBacktest(v.str(o.id, 64), o)
   })
@@ -686,7 +617,6 @@ async function bootstrap() {
     return tradingOverview()
   })
   ipc.handle('trading:enableLive', async (req) => {
-    subscription.requireAccess('Live trading')
     const o = v.obj(req)
     if (v.str(o.confirmation, 40) !== 'ENABLE LIVE TRADING') throw new UserError('validation_failed', 'Type ENABLE LIVE TRADING to confirm.', { confirmation: 'Type ENABLE LIVE TRADING' })
     if (!(await auth.confirmPassword(v.str(o.password, 1024)))) throw new UserError('invalid_password', 'Incorrect password.', { password: 'Incorrect password' })
@@ -718,7 +648,6 @@ async function bootstrap() {
     return tradingOverview()
   })
   ipc.handle('automation:start', async (req) => {
-    subscription.requireAccess('Automated trading')
     const o = v.obj(req)
     await automation.start(v.str(o.strategyId, 64), v.oneOf(o.mode, ['paper', 'live'] as const))
     return tradingOverview()
@@ -728,12 +657,10 @@ async function bootstrap() {
     return tradingOverview()
   })
   ipc.handle('automation:resume', async (req) => {
-    subscription.requireAccess('Automated trading')
     await automation.resume(v.str(v.obj(req).sessionId, 64))
     return tradingOverview()
   })
   ipc.handle('automation:applyVersion', async (req) => {
-    subscription.requireAccess('Automated trading')
     await automation.applyLatestVersion(v.str(v.obj(req).sessionId, 64))
     return tradingOverview()
   })
@@ -749,7 +676,6 @@ async function bootstrap() {
 
   // The AI proposes rules in a conversation; nothing is saved until the client reviews and confirms it in the UI.
   ipc.handle('ai:interpretStrategy', async (req) => {
-    subscription.requireAccess('AI strategy interpretation')
     const o = v.obj(req)
     const provider = o.provider === undefined ? chooseAiProvider() : v.oneOf(o.provider, ['openai', 'anthropic'] as const)
     if (!integrations.isConfigured(provider)) throw new UserError('not_configured', `Configure ${provider === 'openai' ? 'OpenAI' : 'Anthropic Claude'} in Settings first.`)
@@ -834,13 +760,11 @@ async function bootstrap() {
   ipc.handle('gold:status', (req) => gold.status(Boolean(req && v.obj(req).refresh)))
   ipc.handle('gold:detectSymbol', () => gold.status(true))
   ipc.handle('gold:saveSettings', async (req) => {
-    subscription.requireAccess('Automated trading')
     const o = v.obj(req)
     await gold.saveSettings(goldSettingsArg(o.settings), o.confirmLive === true)
     return gold.status()
   })
   ipc.handle('gold:start', async () => {
-    subscription.requireAccess('Automated trading')
     await gold.startBot()
     return gold.status()
   })
@@ -849,13 +773,11 @@ async function bootstrap() {
     return gold.status()
   })
   ipc.handle('gold:order', async (req) => {
-    subscription.requireAccess('Live trading')
     const o = v.obj(req)
     const order = await gold.manualOrder(v.oneOf(o.side, ['buy', 'sell'] as const), v.str(o.requestId, 64))
     notifications.add({ category: 'trading', severity: order.state === 'rejected' ? 'warning' : 'info', title: `Manual ${order.side.toUpperCase()} ${order.state}`, body: `${order.volume} lots${order.avgPrice ? ` @ ${order.avgPrice}` : ''}${order.error ? ` — ${order.error}` : ''}`, native: false })
     return { order, status: await gold.status() }
   })
-  // closing and protecting positions stays possible without an active subscription
   ipc.handle('gold:closePosition', async (req) => {
     const o = v.obj(req)
     await gold.closePosition(v.str(o.id, 80), o.confirmForeign === true)
@@ -873,7 +795,6 @@ async function bootstrap() {
   })
   ipc.handle('gold:candles', (req) => gold.candles(v.oneOf(v.obj(req).timeframe, ['1m', '5m', '15m'] as const)))
   ipc.handle('gold:backtest', async (req) => {
-    subscription.requireAccess('Backtesting')
     const o = v.obj(req)
     const synced = await gold.syncStrategy()
     if (!synced.id || synced.problem) throw new UserError('strategy_invalid', synced.problem ?? 'The Gold strategy is not ready.')
@@ -890,7 +811,6 @@ async function bootstrap() {
   })
 
   ipc.handle('paper:placeOrder', async (req) => {
-    subscription.requireAccess('Paper trading')
     const o = v.obj(req)
     const order = await paper.place(v.str(o.symbol, 32), v.oneOf(o.side, ['buy', 'sell'] as const), v.num(o.quantity, 0, 1e9))
     notifications.add({ category: 'trading', severity: 'info', title: `Paper ${order.side} filled`, body: `${order.quantity} ${order.symbol} @ ${order.fillPrice}`, native: false })
@@ -910,7 +830,6 @@ async function bootstrap() {
     return paper.positions(marks)
   })
   ipc.handle('paper:closePosition', async (req) => {
-    subscription.requireAccess('Paper trading')
     return paper.close(v.str(v.obj(req).symbol, 32))
   })
   ipc.handle('paper:reset', () => paper.reset())
@@ -938,18 +857,6 @@ async function bootstrap() {
   }, 15_000).unref()
   powerMonitor.on('lock-screen', () => auth.isUnlocked() && lockSession('idle'))
   powerMonitor.on('suspend', () => auth.isUnlocked() && lockSession('idle'))
-
-  // Poll the server while unlocked: picks up approvals/cancellations and keeps the trial clock honest.
-  let lastAllowed: boolean | null = null
-  setInterval(async () => {
-    if (!auth.isUnlocked() || !subscription.configured) return
-    const view = await subscription.refresh()
-    if (lastAllowed === true && !view.access.allowed && view.status) {
-      notifications.add({ category: 'subscription', severity: 'warning', title: 'Paid features are paused', body: view.access.detail })
-    }
-    lastAllowed = view.access.allowed
-    emit('subscription:changed', view)
-  }, 60_000).unref()
 
   app.on('before-quit', () => {
     automation.stopScheduler()

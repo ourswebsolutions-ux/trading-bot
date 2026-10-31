@@ -50,7 +50,6 @@ export function Notifications() {
               options={[
                 { value: 'all', label: 'All' },
                 { value: 'unread', label: `Unread${unread ? ` (${unread})` : ''}` },
-                { value: 'subscription', label: 'Subscription' },
                 { value: 'trading', label: 'Trading' },
                 { value: 'update', label: 'Updates' },
                 { value: 'security', label: 'Security' }

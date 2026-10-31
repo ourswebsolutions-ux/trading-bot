@@ -190,7 +190,7 @@ function Updates() {
           }}>Check for updates</Button>
           {updates.phase === 'downloaded' && <Button variant="primary" icon="download" loading={installing} onClick={async () => { setInstalling(true); try { await call('updates:install') } catch (err) { setInstalling(false); toast({ tone: 'bad', title: 'Install failed', body: errorMessage(err) }) } }}>Restart and install v{updates.availableVersion}</Button>}
         </div>
-        <p className="faint" style={{ margin: 0, fontSize: 12 }}>Updates download in the background and are verified (SHA-512, plus code signature on Windows/macOS) before installing. Your password, strategies, settings and subscription are kept.</p>
+        <p className="faint" style={{ margin: 0, fontSize: 12 }}>Updates download in the background and are verified (SHA-512, plus code signature on Windows/macOS) before installing. Your password, strategies and settings are kept.</p>
       </div>
     </Panel>
   )
@@ -205,8 +205,6 @@ function About() {
       <dl className="kv">
         <dt>Version</dt><dd className="mono">{info?.version}</dd>
         <dt>Platform</dt><dd className="mono">{info?.platform}{info && !info.packaged ? ' · development build' : ''}</dd>
-        <dt>Subscription server</dt><dd className="mono">{info?.apiBaseUrl ?? 'not configured'}</dd>
-        <dt>Device ID</dt><dd className="mono">{info?.deviceId ?? 'not registered yet'}</dd>
         <dt>Data folder</dt><dd className="mono selectable" style={{ fontSize: 12 }}>{info?.dataPath}</dd>
         <dt>Trading engine</dt><dd>{engine?.state}{engine?.python ? ` · Python ${engine.python}, engine ${engine.engineVersion}` : ''}{engine?.message ? <div className="faint">{engine.message}</div> : null}</dd>
         <dt>Live trading</dt><dd><Badge tone="warn">Off unless you enable it on the Trading page (separately for each broker)</Badge></dd>

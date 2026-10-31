@@ -3,7 +3,6 @@ import type { BacktestResult, CandleSeries, GoldPositionView, GoldStatus } from 
 import { DEFAULT_GOLD_SETTINGS, GOLD_LIMITS, GOLD_TF_LABEL, validateGoldSettings, type GoldSettings } from '@shared/gold'
 import { CandleChart } from '../components/charts'
 import { Icon } from '../components/icons'
-import { PaywallBanner, useAccess } from '../components/paywall'
 import { Badge, Banner, Button, ConfirmDialog, Dialog, Empty, ErrorState, Field, Panel, PasswordInput, Segmented, Skeleton, StatusDot, useToast } from '../components/ui'
 import { call, errorMessage, fieldErrors } from '../lib/api'
 import { ago, dateTime } from '../lib/format'
@@ -184,7 +183,6 @@ function AutoTradingDialog({ s, onClose, onStatus }: { s: GoldStatus; onClose: (
 }
 
 function Controls({ s, onStatus }: { s: GoldStatus; onStatus: (s: GoldStatus) => void }) {
-  const { allowed } = useAccess()
   const toast = useToast()
   const { busy, run } = useGoldAction(onStatus)
   const [autoDialog, setAutoDialog] = useState(false)
@@ -202,13 +200,13 @@ function Controls({ s, onStatus }: { s: GoldStatus; onStatus: (s: GoldStatus) =>
       <div className="gold-controls">
         <div className="gc-group">
           {!running ? (
-            <Button variant="primary" icon="play" loading={busy === 'start'} disabled={!allowed || s.emergency || !s.symbol} title={!s.symbol ? 'No gold symbol yet' : undefined} onClick={() => void run('start', () => call('gold:start'), s.liveEnabled ? 'Scalper started on your account' : 'Scalper started (paper)').catch(() => undefined)}>Start Scalping</Button>
+            <Button variant="primary" icon="play" loading={busy === 'start'} disabled={s.emergency || !s.symbol} title={!s.symbol ? 'No gold symbol yet' : undefined} onClick={() => void run('start', () => call('gold:start'), s.liveEnabled ? 'Scalper started on your account' : 'Scalper started (paper)').catch(() => undefined)}>Start Scalping</Button>
           ) : <Button icon="stop" onClick={() => setStopDialog(true)}>Stop Scalping</Button>}
           <span className="gc-note">{running ? (sess!.mode === 'live' ? 'Trading your account' : 'Simulating (paper): no real orders') : s.liveEnabled ? `Start trades your ${s.account?.mode === 'real' ? 'REAL-MONEY' : 'demo'} account` : 'Start simulates (paper) until automatic trading is on'}</span>
         </div>
         <div className="gc-group">
           <label className="switch" title="Allow TradePilot to place orders on your MT5 account">
-            <input type="checkbox" checked={s.liveEnabled} disabled={busy === 'auto' || (!s.liveEnabled && (!s.connected || !allowed))} onChange={(e) => {
+            <input type="checkbox" checked={s.liveEnabled} disabled={busy === 'auto' || (!s.liveEnabled && (!s.connected))} onChange={(e) => {
               if (e.target.checked) setAutoDialog(true)
               else void run('auto', async () => { await call('trading:disableLive', { broker: 'mt5' }); return call('gold:status') }, 'Automatic trading is off').catch(() => undefined)
             }} />
@@ -217,8 +215,8 @@ function Controls({ s, onStatus }: { s: GoldStatus; onStatus: (s: GoldStatus) =>
           </label>
         </div>
         <div className="gc-group">
-          <Button className="buy-btn" disabled={!allowed || !accountReady || !s.liveEnabled} title={manualWhy} onClick={() => setManual({ side: 'buy', requestId: crypto.randomUUID() })}>Manual BUY</Button>
-          <Button className="sell-btn" disabled={!allowed || !accountReady || !s.liveEnabled} title={manualWhy} onClick={() => setManual({ side: 'sell', requestId: crypto.randomUUID() })}>Manual SELL</Button>
+          <Button className="buy-btn" disabled={!accountReady || !s.liveEnabled} title={manualWhy} onClick={() => setManual({ side: 'buy', requestId: crypto.randomUUID() })}>Manual BUY</Button>
+          <Button className="sell-btn" disabled={!accountReady || !s.liveEnabled} title={manualWhy} onClick={() => setManual({ side: 'sell', requestId: crypto.randomUUID() })}>Manual SELL</Button>
           <Button icon="x" disabled={!ours.length} onClick={() => setCloseAll(true)}>Close All Trades</Button>
         </div>
         <div className="gc-group">
@@ -520,7 +518,6 @@ function SettingsPanel({ s, onStatus }: { s: GoldStatus; onStatus: (s: GoldStatu
 // ---------- backtest ----------
 function BacktestPanel({ s }: { s: GoldStatus }) {
   const toast = useToast()
-  const { allowed } = useAccess()
   const max = s.settings.timeframe === '1m' ? 5 : 14
   const [days, setDays] = useState(Math.min(5, max))
   const [slip, setSlip] = useState(1)
@@ -535,7 +532,7 @@ function BacktestPanel({ s }: { s: GoldStatus }) {
           <Field label="Days of history" hint={`Up to ${max} days of ${GOLD_TF_LABEL[s.settings.timeframe]} candles`}><input className="input mono" type="number" min={1} max={max} value={days} onChange={(e) => setDays(Math.max(1, Math.min(max, Number(e.target.value) || 1)))} /></Field>
           <Field label="Slippage (bps per fill)" hint="Fast moves and requotes"><input className="input mono" type="number" min={0} max={50} step={0.5} value={slip} onChange={(e) => setSlip(Math.max(0, Math.min(50, Number(e.target.value) || 0)))} /></Field>
           <div style={{ paddingBottom: 18 }}>
-            <Button variant="primary" icon="play" loading={running} disabled={!allowed || !s.connected || !s.symbol} onClick={async () => {
+            <Button variant="primary" icon="play" loading={running} disabled={!s.connected || !s.symbol} onClick={async () => {
               setRunning(true)
               try {
                 setResult(await call('gold:backtest', { days, slippageBps: slip }))
@@ -603,7 +600,6 @@ export function Gold() {
   if (!s) return <div className="page">{status.error ? <ErrorState message={status.error} onRetry={status.reload} /> : <Skeleton height={300} />}</div>
   return (
     <div className="page">
-      <PaywallBanner feature="Gold scalping" />
       {!s.platformSupported && <Banner tone="warn" title="MetaTrader 5 needs Windows">The XAUUSD scalper trades through the MetaTrader 5 terminal, which only runs on Windows. Prices, the account and trading are unavailable on this computer.</Banner>}
       {s.emergency && <Banner tone="bad" icon="stop" title="Emergency stop is active">No new orders are sent. Clear it in the controls when you are ready.</Banner>}
       {s.accountModeProblem && <Banner tone="bad" title="Account and mode do not match">{s.accountModeProblem}</Banner>}

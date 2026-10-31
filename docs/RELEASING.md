@@ -48,7 +48,7 @@ When a `vX.Y.Z` tag is pushed:
    The packaged test covers:
    - first launch and password setup on a clean profile
    - the bundled engine
-   - honest subscription and update states
+   - no subscription or trial gate, honest update states
    - encrypted credential storage, with a clear error for an invalid AI key
    - live trading cannot be started
    - restart with persistence
@@ -77,8 +77,6 @@ Set these under Settings → Secrets and variables → Actions:
 
 | Name | Kind | Effect |
 |---|---|---|
-| `TRADEPILOT_API_BASE_URL` | variable | `https://` URL of the subscription server ([SERVER.md](SERVER.md)). Without it the app reports "Server not configured", and trials and subscriptions are unavailable. |
-| `TRADEPILOT_ENTITLEMENT_PUBLIC_KEY` | variable | The server's Ed25519 public key (base64 SPKI), from `npm run keys:generate -w @tradepilot/server`. |
 | `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD` | secrets | Windows Authenticode certificate (base64 `.pfx`) and password. |
 | `TRADEPILOT_WIN_PUBLISHER` | variable | Exact certificate subject CN; updates from any other publisher are rejected. |
 | `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD` | secrets | Developer ID Application certificate (base64 `.p12`) and password. |

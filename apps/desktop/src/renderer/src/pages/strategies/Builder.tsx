@@ -21,7 +21,6 @@ import {
   type TakeProfit,
   type ValidationResult
 } from '@shared/strategyRules'
-import { PaywallBanner, useAccess } from '../../components/paywall'
 import { Banner, Button, Field, Panel, Segmented, useToast } from '../../components/ui'
 import { call, errorMessage, fieldErrors } from '../../lib/api'
 import { useResource } from '../../lib/hooks'
@@ -162,7 +161,6 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
   const toast = useToast()
   const { prefs } = useApp()
   const active = useBroker()
-  const { allowed } = useAccess()
   const [d, setD] = useState<StrategyDefinition>(() => structuredClone(initial ?? strategy?.definition ?? emptyDefinition(active.defaultSymbol, active.broker)))
   const venue = venueOf(d)
   const ccy = venue === 'mt5' ? 'account currency' : 'USD'
@@ -242,7 +240,6 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
 
   return (
     <div className="page">
-      <PaywallBanner feature="Creating and editing strategies" />
       {source === 'ai' && (
         <Banner tone="info" icon="brain" title="AI-interpreted rules">These rules were proposed by AI from your description. Check every value; nothing is saved until you choose Save.</Banner>
       )}
@@ -382,8 +379,8 @@ export function Builder({ strategy, initial, source, aiProvider, aiText, onClose
           <Panel>
             <div style={{ display: 'grid', gap: 10 }}>
               {error && <Banner tone="bad">{error}</Banner>}
-              <Button variant="primary" block loading={saving === 'save'} disabled={saving !== null || !allowed} onClick={() => void save(false)}>{strategy ? 'Save changes' : 'Save as disabled'}</Button>
-              <Button block loading={saving === 'enable'} disabled={saving !== null || !allowed || !validation?.valid} onClick={() => void save(true)}>Save and enable</Button>
+              <Button variant="primary" block loading={saving === 'save'} disabled={saving !== null} onClick={() => void save(false)}>{strategy ? 'Save changes' : 'Save as disabled'}</Button>
+              <Button block loading={saving === 'enable'} disabled={saving !== null || !validation?.valid} onClick={() => void save(true)}>Save and enable</Button>
               <span className="faint" style={{ fontSize: 12 }}>
                 {validation?.valid ? 'Enabled strategies can be run in paper or live automation from the Trading page; enabling alone places no orders.' : 'You can save an incomplete strategy as a draft. It can only be enabled once every check passes.'}
                 {strategy?.status === 'enabled' ? ' Saving changes that fail validation disables the strategy.' : ''}

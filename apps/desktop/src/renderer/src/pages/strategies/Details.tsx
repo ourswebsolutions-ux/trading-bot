@@ -91,10 +91,9 @@ function Activity({ s }: { s: Strategy }) {
   )
 }
 
-export function Details({ s, busy, onBack, onEdit, onModify, onReprompt, onDuplicate, onToggle, onDelete, onBacktest, onChanged, allowed }: {
+export function Details({ s, busy, onBack, onEdit, onModify, onReprompt, onDuplicate, onToggle, onDelete, onBacktest, onChanged }: {
   s: Strategy
   busy: string | null
-  allowed: boolean
   onBack: () => void
   onEdit: () => void
   onModify: () => void
@@ -136,13 +135,13 @@ export function Details({ s, busy, onBack, onEdit, onModify, onReprompt, onDupli
           {s.source === 'converted' && <Banner tone="info">Converted from an earlier template strategy. Review the rules and set the daily limits before enabling.</Banner>}
           {s.status === 'enabled' && <Banner tone="ok" title="Enabled">This strategy passed validation. Enabling places no orders: start paper trading (simulated) here, or paper/live automation on the Trading page.</Banner>}
           <div className="btn-row">
-            <Button variant="primary" icon="brain" disabled={!allowed || busy !== null} onClick={onModify}>Change with a prompt</Button>
-            {s.prompt && <Button icon="refresh" disabled={!allowed || busy !== null} onClick={onReprompt}>Revise original prompt</Button>}
-            <Button icon={s.status === 'enabled' ? 'lock' : 'check'} loading={busy === 'toggle'} disabled={busy !== null || (s.status === 'disabled' && (!s.validation.valid || !allowed))} onClick={onToggle}>{s.status === 'enabled' ? 'Disable' : 'Enable'}</Button>
-            <Button icon="analytics" disabled={!allowed || !s.validation.valid || busy !== null} onClick={onBacktest}>Backtest</Button>
-            <Button icon="play" loading={starting} disabled={!allowed || s.status !== 'enabled' || busy !== null || starting} title={s.status !== 'enabled' ? 'Enable the strategy first' : undefined} onClick={() => void startPaper()}>Start paper trading</Button>
-            <Button icon="sliders" variant="ghost" disabled={!allowed || busy !== null} onClick={onEdit}>Advanced edit</Button>
-            <Button icon="copy" variant="ghost" loading={busy === 'duplicate'} disabled={!allowed || busy !== null} onClick={onDuplicate}>Duplicate</Button>
+            <Button variant="primary" icon="brain" disabled={busy !== null} onClick={onModify}>Change with a prompt</Button>
+            {s.prompt && <Button icon="refresh" disabled={busy !== null} onClick={onReprompt}>Revise original prompt</Button>}
+            <Button icon={s.status === 'enabled' ? 'lock' : 'check'} loading={busy === 'toggle'} disabled={busy !== null || (s.status === 'disabled' && (!s.validation.valid))} onClick={onToggle}>{s.status === 'enabled' ? 'Disable' : 'Enable'}</Button>
+            <Button icon="analytics" disabled={!s.validation.valid || busy !== null} onClick={onBacktest}>Backtest</Button>
+            <Button icon="play" loading={starting} disabled={s.status !== 'enabled' || busy !== null || starting} title={s.status !== 'enabled' ? 'Enable the strategy first' : undefined} onClick={() => void startPaper()}>Start paper trading</Button>
+            <Button icon="sliders" variant="ghost" disabled={busy !== null} onClick={onEdit}>Advanced edit</Button>
+            <Button icon="copy" variant="ghost" loading={busy === 'duplicate'} disabled={busy !== null} onClick={onDuplicate}>Duplicate</Button>
             <Button icon="trash" variant="danger" disabled={busy !== null} onClick={onDelete}>Delete</Button>
           </div>
         </div>

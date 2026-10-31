@@ -11,7 +11,7 @@ These are developer commands, run from the repository root.
 ```powershell
 npm ci
 python -m pip install -r engine/requirements-mt5.txt   # Windows: MetaQuotes' MetaTrader5 package
-npm run dev                                            # starts the app (and a local subscription server)
+npm run dev                                            # starts the app
 ```
 
 Windows installers (`TradePilot-Setup-<version>.exe`) bundle the trading engine and the MT5 bridge, so users need neither Python nor Node. For building them, see [RELEASING.md](RELEASING.md) and [MT5.md](MT5.md#windows-demo-account-verification).

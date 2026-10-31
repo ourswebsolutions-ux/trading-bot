@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { TIMEFRAMES } from '@shared/strategyRules'
 import type { PaperPosition, Timeframe } from '@shared/ipc'
 import { CandleChart } from '../../components/charts'
-import { PaywallBanner, useAccess } from '../../components/paywall'
 import { Banner, Button, ConfirmDialog, Empty, ErrorState, Field, Panel, Segmented, Skeleton, useToast } from '../../components/ui'
 import { call, errorMessage } from '../../lib/api'
 import { dateTime, money, pct, price, qty } from '../../lib/format'
@@ -16,7 +15,6 @@ const TF_DAYS: Record<Timeframe, number> = { '1m': 1, '5m': 2, '15m': 5, '30m': 
 export function ManualPaper() {
   const { broker, label: brokerLabel, defaultSymbol } = useBroker()
   const toast = useToast()
-  const { allowed } = useAccess()
   const [symbol, setSymbol] = useState(defaultSymbol)
   useEffect(() => setSymbol(defaultSymbol), [defaultSymbol])
   const [tf, setTf] = useState<Timeframe>('15m')
@@ -59,7 +57,6 @@ export function ManualPaper() {
       <Banner tone="info" icon="shield" title="Manual paper trading">
         Orders on this tab are simulated. They fill at the current {brokerLabel} {broker === 'mt5' ? 'mid price' : 'mark price'} and never reach {broker === 'mt5' ? 'your broker' : 'the exchange'}. Automated live trading is controlled on the Automation tab.
       </Banner>
-      <PaywallBanner feature="Paper trading" />
 
       <div className="grid split">
         <Panel
@@ -81,7 +78,7 @@ export function ManualPaper() {
             className="form"
             onSubmit={(e) => {
               e.preventDefault()
-              if (qtyValid && allowed) setConfirm({ kind: 'order' })
+              if (qtyValid) setConfirm({ kind: 'order' })
             }}
           >
             <Segmented className="side" value={side} onChange={setSide} options={[{ value: 'buy', label: 'Buy / Long', className: 'buy' }, { value: 'sell', label: 'Sell / Short', className: 'sell' }]} />
@@ -94,7 +91,7 @@ export function ManualPaper() {
               <dt>Funding (8h)</dt><dd className="num" style={{ textAlign: 'right' }}>{quote?.fundingRate !== null && quote?.fundingRate !== undefined ? pct(quote.fundingRate, 4) : '—'}</dd>
               <dt>Price source</dt><dd style={{ textAlign: 'right' }}><FreshnessBadge state={quoteState} /></dd>
             </dl>
-            <Button type="submit" variant={side} size="lg" block disabled={!qtyValid || !allowed || !mark}>
+            <Button type="submit" variant={side} size="lg" block disabled={!qtyValid || !mark}>
               {side === 'buy' ? 'Buy' : 'Sell'} {qtyValid ? qty(q) : ''} {symbol}
             </Button>
             <p className="faint" style={{ margin: 0, fontSize: 12 }}>Simulated fill at mark price. No fees, slippage or funding are applied to paper fills.{mark === undefined ? ' Orders are disabled until a fresh price is available.' : ''}</p>
@@ -121,7 +118,7 @@ export function ManualPaper() {
                   <td className="r num">{price(p.markPrice)}</td>
                   <td className={`r num ${(p.unrealizedPnl ?? 0) >= 0 ? 'up' : 'down'}`}>{p.unrealizedPnl === null ? <span className="faint" title="Mark price unavailable">—</span> : money(p.unrealizedPnl, { sign: true })}</td>
                   <td className={`r num ${p.realizedPnl >= 0 ? 'up' : 'down'}`}>{money(p.realizedPnl, { sign: true })}</td>
-                  <td className="r">{p.quantity !== 0 && <Button size="sm" disabled={!allowed} onClick={() => setConfirm({ kind: 'close', p })}>Close</Button>}</td>
+                  <td className="r">{p.quantity !== 0 && <Button size="sm" onClick={() => setConfirm({ kind: 'close', p })}>Close</Button>}</td>
                 </tr>
               ))}
             </tbody>

@@ -6,37 +6,23 @@ import { Icon } from '../components/icons'
 import { QuoteLine, TransportStatus } from '../components/market'
 import { Badge, Button, Empty, ErrorState, Panel, Segmented, Skeleton, StatusDot } from '../components/ui'
 import { call } from '../lib/api'
-import { ago, compact, date, duration, money, pct, price, qty } from '../lib/format'
+import { ago, compact, money, pct, price, qty } from '../lib/format'
 import { useEvent, useNow, useResource } from '../lib/hooks'
 import { useLiveSeries, useMarketWatch } from '../lib/market'
 import { useBroker } from '../lib/broker'
-import { serverNow, useApp } from '../lib/state'
+import { useApp } from '../lib/state'
 import { Mt5AccountPanel } from '../components/mt5Account'
 
 const TF_DAYS: Record<Timeframe, number> = { '1m': 1, '5m': 2, '15m': 5, '30m': 10, '1h': 14, '4h': 45, '1d': 240 }
 const SERVICE_LABEL: Record<IntegrationId, string> = { delta: 'Delta Exchange account', mt5: 'MetaTrader 5', marketdata: 'Market data', openai: 'OpenAI', anthropic: 'Anthropic Claude', smtp: 'SMTP email', whatsapp: 'WhatsApp Business' }
 
-function AccessTile() {
-  const { subscription, navigate } = useApp()
-  const now = useNow(1000)
-  const s = subscription?.status
-  let value = '—'
-  let sub = subscription?.access.detail ?? 'Checking…'
-  if (s?.subscription?.status === 'active') {
-    value = s.subscription.planCode === 'lifetime' ? 'Lifetime' : 'Monthly'
-    sub = s.subscription.expiresAt ? `Renews/expires ${date(s.subscription.expiresAt)}` : 'No expiry'
-  } else if (s?.trial.active) {
-    value = duration(Math.max(0, Date.parse(s.trial.endsAt) - serverNow(subscription, now)))
-    sub = `Free trial · ends ${date(s.trial.endsAt)}`
-  } else if (s) {
-    value = 'Inactive'
-    sub = 'Paid features paused'
-  }
+function EngineTile() {
+  const { engine, navigate } = useApp()
   return (
-    <button className="panel tile" style={{ textAlign: 'left', cursor: 'pointer' }} onClick={() => navigate('subscription')}>
-      <span className="label">Access</span>
-      <span className="value">{value}</span>
-      <span className="sub">{sub}</span>
+    <button className="panel tile" style={{ textAlign: 'left', cursor: 'pointer' }} onClick={() => navigate('settings', { tab: 'about' })}>
+      <span className="label">Trading engine</span>
+      <span className="value">{engine?.state === 'ready' ? 'Ready' : engine?.state === 'error' ? 'Error' : engine?.state === 'starting' ? 'Starting' : 'Idle'}</span>
+      <span className="sub">{engine?.state === 'ready' ? `Python ${engine.python} · engine ${engine.engineVersion}` : engine?.message ?? 'Starts on first use'}</span>
     </button>
   )
 }
@@ -55,7 +41,7 @@ function ServiceRow({ tone, name, detail, onClick }: { tone?: 'ok' | 'bad' | 'wa
 }
 
 function Services({ integrations, health }: { integrations: IntegrationView[] | undefined; health: Parameters<typeof TransportStatus>[0]['health'] }) {
-  const { navigate, subscription, engine, updates } = useApp()
+  const { navigate, engine, updates } = useApp()
   const now = useNow(15_000)
   const integ = (id: IntegrationId) => integrations?.find((v) => v.id === id)
   const describe = (v: IntegrationView | undefined) => {
@@ -70,12 +56,6 @@ function Services({ integrations, health }: { integrations: IntegrationView[] | 
   const { broker } = useBroker()
   return (
     <Panel title="Services" flush>
-      <ServiceRow
-        tone={!subscription?.configured ? 'warn' : subscription.syncError ? 'bad' : subscription.lastSyncedAt ? 'ok' : undefined}
-        name="Subscription server"
-        detail={!subscription?.configured ? 'Not configured in this build' : subscription.syncError ?? `Synced ${ago(subscription.lastSyncedAt, now)}`}
-        onClick={() => navigate('subscription')}
-      />
       <ServiceRow
         tone={!md ? undefined : md.transport === 'websocket' ? 'ok' : md.transport === 'rest' ? 'warn' : 'bad'}
         name="Market data"
@@ -165,7 +145,7 @@ export function Dashboard() {
   return (
     <div className="page">
       <div className="grid cols-4">
-        <AccessTile />
+        <EngineTile />
         <div className="panel tile">
           <span className="label">Strategies</span>
           <span className="value">{strategies.data ? active.length : '—'}</span>

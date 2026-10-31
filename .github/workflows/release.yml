@@ -7,11 +7,9 @@ name: Release
 # (workflow_dispatch) to build and test installers without publishing.
 #
 # Optional repository configuration (Settings → Secrets and variables → Actions):
-#   vars.TRADEPILOT_API_BASE_URL            https:// URL of the subscription server
-#   vars.TRADEPILOT_ENTITLEMENT_PUBLIC_KEY  the server's Ed25519 public key (base64 SPKI)
 #   secrets.WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD, vars.TRADEPILOT_WIN_PUBLISHER   Windows code signing
 #   secrets.MAC_CSC_LINK / MAC_CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID   macOS signing + notarization
-# Without them the installers are unsigned and the app reports "subscription server not configured".
+# Without them the installers are unsigned.
 on:
   push:
     tags: ['v*.*.*']
@@ -42,8 +40,6 @@ jobs:
           - { name: macos-arm64, os: macos-14, builder: --mac --arm64 }
           - { name: macos-x64, os: macos-15-intel, builder: --mac --x64 }
     env:
-      MAIN_VITE_API_BASE_URL: ${{ vars.TRADEPILOT_API_BASE_URL }}
-      MAIN_VITE_ENTITLEMENT_PUBLIC_KEY: ${{ vars.TRADEPILOT_ENTITLEMENT_PUBLIC_KEY }}
       TRADEPILOT_REQUIRE_BUNDLED_ENGINE: '1'
       TRADEPILOT_WIN_PUBLISHER: ${{ vars.TRADEPILOT_WIN_PUBLISHER }}
       E2E_SCREENSHOT_DIR: ${{ github.workspace }}/smoke-shots

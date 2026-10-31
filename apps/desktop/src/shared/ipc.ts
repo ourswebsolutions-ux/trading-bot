@@ -3,7 +3,6 @@
  * call these channels (the preload whitelists them) and never sees secrets: credential
  * values go in, but only masked hints come back out.
  */
-import type { PaymentAvailability, PaymentRequestDto, PlanDto, StatusResponse } from '@tradepilot/shared'
 import type { DefinitionChange, StrategyDefinition, StrategyExplanation, ValidationResult } from './strategyRules'
 
 export type Result<T> = { ok: true; data: T } | { ok: false; error: IpcError }
@@ -25,43 +24,6 @@ export interface UnlockResult {
   unlocked: boolean
   attemptsRemaining?: number
   lockedUntil?: string | null
-}
-
-// ---------- subscription ----------
-export interface SubscriptionView {
-  configured: boolean
-  configurationError: string | null
-  online: boolean
-  lastSyncedAt: string | null
-  syncError: string | null
-  /** Server status minus the raw entitlement token. */
-  status: Omit<StatusResponse, 'entitlementToken'> | null
-  /** serverTime - localTime at the last sync, so countdowns ignore local clock changes. */
-  serverOffsetMs: number
-  access: { allowed: boolean; reason: string; source: 'server' | 'offline_token' | 'none'; detail: string }
-}
-export interface PlansView {
-  plans: PlanDto[]
-  /** Optional extra payment details from the server (account / wallet); the app shows its own instructions. */
-  paymentInstructions: string | null
-  referenceCode: string
-  payments: PaymentAvailability
-  /** The client's own email connection (Settings → SMTP Email), used to send the payment request. */
-  clientEmail: { configured: boolean; address: string | null; problem: string | null }
-}
-export interface ScreenshotSelection {
-  id: string
-  name: string
-  sizeBytes: number
-  mime: string
-  previewDataUrl: string
-}
-export interface SubmitPaymentInput {
-  planCode: string
-  transactionId: string
-  contactEmail?: string
-  note?: string
-  screenshotId: string
 }
 
 // ---------- settings & integrations ----------
@@ -739,8 +701,6 @@ export interface AppInfo {
   platform: string
   packaged: boolean
   dataPath: string
-  apiBaseUrl: string | null
-  deviceId: string | null
 }
 
 /** channel → [request, response] */
@@ -755,12 +715,6 @@ export interface IpcContract {
   'auth:resetApplication': [{ confirmation: string }, AuthStatus]
   'auth:activity': [void, void]
 
-  'subscription:view': [void, SubscriptionView]
-  'subscription:refresh': [void, SubscriptionView]
-  'subscription:plans': [void, PlansView]
-  'subscription:requests': [void, PaymentRequestDto[]]
-  'subscription:pickScreenshot': [void, ScreenshotSelection | null]
-  'subscription:submit': [SubmitPaymentInput, PaymentRequestDto]
 
   'settings:getPreferences': [void, GeneralPreferences]
   'settings:savePreferences': [Partial<GeneralPreferences>, GeneralPreferences]
@@ -852,7 +806,6 @@ export type Res<C extends Channel> = IpcContract[C][1]
 /** Push events from main to renderer. */
 export interface EventContract {
   'auth:changed': AuthStatus
-  'subscription:changed': SubscriptionView
   'updates:changed': UpdateState
   'notifications:changed': { unread: number }
   'engine:changed': EngineStatus
@@ -865,7 +818,6 @@ export type EventName = keyof EventContract
 
 export const CHANNELS: Channel[] = [
   'app:info', 'auth:status', 'auth:setup', 'auth:unlock', 'auth:lock', 'auth:logout', 'auth:changePassword', 'auth:resetApplication', 'auth:activity',
-  'subscription:view', 'subscription:refresh', 'subscription:plans', 'subscription:requests', 'subscription:pickScreenshot', 'subscription:submit',
   'settings:getPreferences', 'settings:savePreferences', 'settings:secretStorage',
   'integrations:list', 'integrations:save', 'integrations:test', 'integrations:action', 'integrations:clear',
   'strategies:list', 'strategies:get', 'strategies:save', 'strategies:validate', 'strategies:setEnabled', 'strategies:delete', 'strategies:duplicate', 'strategies:backtest', 'strategies:versions', 'strategies:activity',
@@ -880,7 +832,7 @@ export const CHANNELS: Channel[] = [
   'updates:state', 'updates:check', 'updates:install',
   'shell:openDataFolder'
 ]
-export const EVENTS: EventName[] = ['auth:changed', 'subscription:changed', 'updates:changed', 'notifications:changed', 'engine:changed', 'market:changed', 'market:candle', 'integrations:progress', 'trading:changed']
+export const EVENTS: EventName[] = ['auth:changed', 'updates:changed', 'notifications:changed', 'engine:changed', 'market:changed', 'market:candle', 'integrations:progress', 'trading:changed']
 
 export interface TradePilotBridge {
   invoke<C extends Channel>(channel: C, ...args: Req<C> extends void ? [] : [Req<C>]): Promise<Result<Res<C>>>

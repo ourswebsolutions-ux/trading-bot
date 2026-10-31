@@ -1,24 +1,16 @@
 /**
- * End-to-end smoke test: real subscription server (in-process) + the built Electron app,
- * driven through its UI. Run with `npm run test:e2e` from the repo root.
+ * End-to-end smoke test: the built Electron app, driven through its UI. Run with `npm run test:e2e` from the repo root.
  *
  * Uses a throwaway user-data directory and `--password-store=basic`, so it never touches
  * your real TradePilot data or your OS keychain. Requires network access to Delta
  * Exchange's public API (market data + backtest) and python3 on PATH.
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { AddressInfo } from 'node:net'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core'
-import { createContext } from '../../server/src/bootstrap.js'
-import { loadConfig } from '../../server/src/config.js'
-import { buildApp } from '../../server/src/http/app.js'
-import { MemoryMailer } from '../../server/src/services/mailer.js'
-import { hashPassword } from '@tradepilot/shared/passwords'
-import { fakeSmtp } from '../test/fakeSmtp.js'
 import { explainDefinition, validateDefinition, type StrategyDefinition } from '../src/shared/strategyRules.js'
 import type { InterpretationTurn } from '../src/shared/ipc.js'
 
@@ -38,24 +30,8 @@ const shot = async (page: Page, name: string) => {
 }
 
 async function main() {
-  // ---------- server ----------
-  const serverDir = mkdtempSync(path.join(tmpdir(), 'tp-e2e-server-'))
-  const REVIEW_PASSPHRASE = 'harbor review passphrase 58'
-  const config = loadConfig({ NODE_ENV: 'test', DATA_DIR: serverDir, PUBLIC_BASE_URL: 'http://127.0.0.1:8787', REVIEW_PASSPHRASE_HASH: await hashPassword(REVIEW_PASSPHRASE) })
-  // the client's own mail server (Settings → SMTP Email); payment requests are sent through it
-  const clientSmtp = await fakeSmtp()
-  const mailer = new MemoryMailer()
-  const ctx = createContext(config, { mailer })
-  // no payment instructions, administrator accounts or admin panel: the default business address receives requests
-  const server = await buildApp(ctx)
-  await server.listen({ port: 0, host: '127.0.0.1' })
-  const apiUrl = `http://127.0.0.1:${(server.server.address() as AddressInfo).port}`
-  console.log(`server at ${apiUrl}`)
-
   // ---------- app ----------
   const userData = mkdtempSync(path.join(tmpdir(), 'tp-e2e-userdata-'))
-  const proof = path.join(userData, 'proof.png')
-  writeFileSync(proof, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a8f30000000049454e44ae426082', 'hex'))
   // Editors such as VS Code export ELECTRON_RUN_AS_NODE, which would start Electron as plain Node.
   const { ELECTRON_RUN_AS_NODE: _drop, ...parentEnv } = process.env
   app = await electron.launch({
@@ -63,8 +39,6 @@ async function main() {
     args: [desktopDir, '--password-store=basic'],
     env: {
       ...(parentEnv as Record<string, string>),
-      TRADEPILOT_API_URL: apiUrl,
-      TRADEPILOT_ENTITLEMENT_PUBLIC_KEY: ctx.keys.publicKeyBase64,
       TRADEPILOT_USER_DATA_DIR: userData,
       TRADEPILOT_E2E_HIDDEN: '1',
       ELECTRON_RENDERER_URL: ''
@@ -110,11 +84,10 @@ async function main() {
     await page.getByText('TradePilot has no economic-news feed').waitFor()
     await shot(page, '01b-gold-scalper')
 
-    step('dashboard: trial registered with the server, live market data')
+    step('dashboard: live market data, everything available without a subscription')
     await nav(page, 'Dashboard')
     await page.getByRole('heading', { name: 'Dashboard' }).waitFor()
-    await page.getByText(/Synced/).first().waitFor({ timeout: 20_000 })
-    await page.getByText('Free trial').first().waitFor()
+    assert.equal(await page.getByText(/Free trial|Subscription|Choose a plan|Server not configured/).count(), 0, 'no subscription, trial or plan anywhere')
     await page.locator('table.data tbody tr').first().waitFor({ timeout: 30_000 })
     await page.locator('.chart svg rect').first().waitFor({ timeout: 30_000 })
     step('dashboard: live price streamed over WebSocket')
@@ -203,68 +176,10 @@ async function main() {
     await page.getByRole('cell', { name: 'flat' }).or(page.getByRole('button', { name: 'Close' })).first().waitFor()
     await shot(page, '06-trading')
 
-    step('subscription: needs the client\'s email connection, sends the request via the client\'s SMTP, confirmed with the passphrase')
-    await nav(page, 'Subscription')
-    await page.getByText('$20').first().waitFor()
-    await page.getByText('$500').first().waitFor()
-    await page.getByText('Configure your email connection before paying').waitFor()
-    assert.equal(await page.getByText('Payment requests are unavailable').count(), 0)
-    assert.equal(await page.getByText(/REVIEW_PASSPHRASE_HASH/).count(), 0, 'server is set up: no setup message')
-    await shot(page, '07-subscription-plans')
-    await page.getByRole('button', { name: 'Choose Monthly' }).click()
-    await page.getByText('Configure your email connection first').waitFor()
-    assert.equal(await page.getByRole('button', { name: 'Submit for review' }).isDisabled(), true, 'cannot submit without an email connection')
-    // the client configures their SMTP connection (here: a local test mail server without authentication)
-    const saved = await page.evaluate((port) => (window as unknown as { tradepilot: { invoke: (c: string, a: unknown) => Promise<{ ok: boolean }> } }).tradepilot.invoke('integrations:save', {
-      id: 'smtp', config: { host: '127.0.0.1', port: String(port), secure: 'false', requireTLS: 'false', from: 'Client <client@example.test>', testRecipient: 'client@example.test' }, secrets: {}
-    }), clientSmtp.port)
-    assert.equal(saved.ok, true, JSON.stringify(saved))
-    await nav(page, 'Dashboard')
-    await nav(page, 'Subscription')
-    await page.getByRole('button', { name: 'Choose Monthly' }).click()
-    await page.getByText(/For payment details, email/).waitFor()
-    assert.equal(await page.getByText('Configure your email connection first').count(), 0)
-    assert.equal(await page.getByLabel('Your email address').inputValue(), 'client@example.test', 'registered email from the SMTP settings')
-    await app.evaluate(({ dialog }, file) => {
-      dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [file] })) as typeof dialog.showOpenDialog
-    }, proof)
-    await page.getByLabel('Transaction ID').fill('E2E-TXN-000123')
-    await page.getByRole('button', { name: 'Choose screenshot…' }).click()
-    await page.getByText('proof.png').waitFor()
-    await shot(page, '08-payment-form')
-    await page.getByRole('button', { name: 'Submit for review' }).click()
-    await page.getByRole('button', { name: 'Submit request' }).click()
-    await page.getByText('Payment under review').waitFor({ timeout: 20_000 })
-    await page.getByText('Pending review', { exact: true }).waitFor()
-    // delivered by the client's SMTP server to the business address, with the screenshot attached
-    const raw = clientSmtp.received.find((m) => m.includes('E2E-TXN-000123'))
-    assert.ok(raw, 'payment request delivered through the client\'s SMTP')
-    const text = raw.replace(/=\r\n/g, '')
-    assert.match(text, /To: ourswebsolutions@gmail\.com/)
-    assert.match(text, /Client email: +client@example\.test/)
-    assert.match(text, /Plan: +Monthly/)
-    assert.match(text, /Content-Disposition: attachment; filename=payment-E2E-TXN-000123\.png/)
-    await ctx.notifier.idle()
-    assert.ok(!mailer.sent.some((m) => m.to === 'ourswebsolutions@gmail.com'), 'the server sent nothing itself')
-    // the recipient opens Confirm Payment: GET changes nothing, the decision needs the review passphrase
-    const confirmPath = new URL(/Confirm Payment:\s+(\S+)/.exec(text)![1]!).pathname
-    const reviewPage = await fetch(apiUrl + confirmPath)
-    assert.equal(reviewPage.status, 200)
-    assert.equal((ctx.db.prepare(`SELECT status FROM payment_requests WHERE transaction_id = 'E2E-TXN-000123'`).get() as { status: string }).status, 'pending', 'opening the link approves nothing')
-    const cookie = reviewPage.headers.get('set-cookie')!.split(';')[0]!
-    const csrf = /name="_csrf" value="([^"]+)"/.exec(await reviewPage.text())![1]!
-    const post = (passphrase: string) => fetch(apiUrl + confirmPath, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ _csrf: csrf, verified: 'yes', passphrase }) })
-    assert.equal((await post('the client guessing')).status, 401, 'the client cannot approve their own request')
-    assert.match(await (await post(REVIEW_PASSPHRASE)).text(), /Payment confirmed/)
-    await page.getByRole('button', { name: 'Refresh' }).click()
-    await page.getByText('Approved', { exact: true }).waitFor({ timeout: 20_000 })
-    await page.getByText('Monthly').first().waitFor()
-    await shot(page, '09-subscription-active')
-
     step('notifications (bell icon; the tab was removed)')
     assert.equal(await page.getByRole('navigation', { name: 'Main' }).getByRole('button', { name: /^Notifications/ }).count(), 0)
     await page.getByRole('button', { name: /^Notifications \(/ }).click()
-    await page.getByText('Payment confirmed', { exact: true }).first().waitFor({ timeout: 20_000 })
+    await page.getByText('Paper buy filled').first().waitFor({ timeout: 20_000 })
     await shot(page, '10-notifications')
     await page.getByRole('button', { name: 'Mark all read' }).click()
 
@@ -405,7 +320,7 @@ async function main() {
     app = await electron.launch({
       executablePath: require('electron') as unknown as string,
       args: [desktopDir, '--password-store=basic'],
-      env: { ...(parentEnv as Record<string, string>), TRADEPILOT_API_URL: apiUrl, TRADEPILOT_ENTITLEMENT_PUBLIC_KEY: ctx.keys.publicKeyBase64, TRADEPILOT_USER_DATA_DIR: userData, TRADEPILOT_E2E_HIDDEN: '1', ELECTRON_RENDERER_URL: '' }
+      env: { ...(parentEnv as Record<string, string>), TRADEPILOT_USER_DATA_DIR: userData, TRADEPILOT_E2E_HIDDEN: '1', ELECTRON_RENDERER_URL: '' }
     })
     page = await app.firstWindow()
     await page.locator('.welcome').click()
@@ -422,11 +337,6 @@ async function main() {
     throw err
   } finally {
     await app.close()
-    await server.close()
-    clientSmtp.server.close()
-    await ctx.notifier.idle()
-    ctx.db.close()
-    rmSync(serverDir, { recursive: true, force: true })
     rmSync(userData, { recursive: true, force: true })
   }
 }

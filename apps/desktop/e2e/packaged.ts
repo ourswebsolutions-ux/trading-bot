@@ -6,7 +6,7 @@
  * Runs with a brand-new user profile (Electron's --user-data-dir; packaged builds deliberately
  * ignore TradePilot's test environment variables) and checks:
  * first launch and password setup, database persistence across restarts, the bundled trading
- * engine (no system Python), honest subscription/update/credential states, a clear error for an
+ * engine (no system Python), no subscription or trial gate, honest update/credential states, a clear error for an
  * invalid AI key, and that live trading cannot be started.
  */
 import assert from 'node:assert/strict'
@@ -61,13 +61,10 @@ async function main() {
     await page.getByRole('heading', { name: 'Gold Scalper' }).waitFor({ timeout: 30_000 })
     await shot(page, '01-dashboard')
 
-    step('subscription status is reported honestly')
-    // release builds without a configured server must say so, never pretend a trial is active
-    const serverLabel = page.getByText('Server not configured').first()
-    const synced = page.getByText(/Synced|Server offline|Sync error/).first()
-    await serverLabel.or(synced).waitFor({ timeout: 30_000 })
-    const configured = !(await serverLabel.isVisible())
-    console.log(`  subscription server configured in this build: ${configured}`)
+    step('no subscription: every feature is available')
+    await page.getByRole('navigation', { name: 'Main' }).waitFor()
+    assert.equal(await page.getByRole('button', { name: /^Subscription/ }).count(), 0, 'no Subscription page')
+    assert.equal(await page.getByText(/Free trial|Choose a plan|Server not configured|Paid features/).count(), 0, 'no trial or plan gate')
 
     step('bundled trading engine starts without a system Python')
     await nav(page, 'Settings')

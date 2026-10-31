@@ -35,7 +35,7 @@ interface AuthRow {
 
 /**
  * Local application authentication (password only). This protects access to the app on
- * this computer; it is independent of subscription authorization, which the server decides.
+ * this computer.
  */
 export class LocalAuth {
   private unlocked = false

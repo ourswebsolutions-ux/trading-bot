@@ -80,7 +80,7 @@ export const INTEGRATION_META: Record<IntegrationId, { title: string; icon: Icon
   smtp: {
     title: 'SMTP Email',
     icon: 'mail',
-    blurb: 'Your mail server for alert email from this computer. (Subscription emails are sent by the TradePilot server using the same SMTP module.)',
+    blurb: 'Your mail server for alert email from this computer.',
     fields: [
       { key: 'host', label: 'SMTP host', placeholder: 'smtp.example.com' },
       { key: 'port', label: 'Port', type: 'number' },

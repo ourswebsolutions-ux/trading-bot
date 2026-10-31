@@ -3,7 +3,6 @@ import { BROKER_LABEL, type AutomationMode, type AutomationSessionView, type Bro
 import { venueOf } from '@shared/strategyRules'
 import { RISK_LIMITS, type TradingRiskSettings } from '@shared/tradingRisk'
 import { Icon } from '../../components/icons'
-import { PaywallBanner, useAccess } from '../../components/paywall'
 import { Badge, Banner, Button, ConfirmDialog, Dialog, Empty, Field, Panel, PasswordInput, useToast } from '../../components/ui'
 import { call, errorMessage, fieldErrors } from '../../lib/api'
 import { ago, dateTime, money, price, qty } from '../../lib/format'
@@ -65,7 +64,6 @@ function EmergencyBar({ o, onChange }: { o: TradingOverview; onChange: (o: Tradi
 
 function LivePanel({ o, onChange }: { o: TradingOverview; onChange: (o: TradingOverview) => void }) {
   const toast = useToast()
-  const { allowed } = useAccess()
   const [enabling, setEnabling] = useState(false)
   const [disabling, setDisabling] = useState(false)
   const [password, setPassword] = useState('')
@@ -107,7 +105,7 @@ function LivePanel({ o, onChange }: { o: TradingOverview; onChange: (o: TradingO
               }
             }}>Turn live trading off</Button>
           ) : (
-            <Button variant="primary" icon="bolt" disabled={!ready || !allowed} onClick={() => setEnabling(true)}>Enable live trading…</Button>
+            <Button variant="primary" icon="bolt" disabled={!ready} onClick={() => setEnabling(true)}>Enable live trading…</Button>
           )}
         </div>
       </div>
@@ -228,7 +226,6 @@ function decisionText(s: AutomationSessionView): string {
 export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview; strategies: Strategy[]; onChange: (o: TradingOverview) => void }) {
   const toast = useToast()
   const { navigate } = useApp()
-  const { allowed } = useAccess()
   const now = useNow(1000)
   const [busy, setBusy] = useState<string | null>(null)
   const [stopping, setStopping] = useState<AutomationSessionView | null>(null)
@@ -251,7 +248,6 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
 
   return (
     <div className="grid" style={{ gap: 16 }}>
-      <PaywallBanner feature="Automated trading" />
       <EmergencyBar o={o} onChange={onChange} />
       <Panel title="Strategy automation" flush>
         {enabled.length === 0 ? (
@@ -307,11 +303,11 @@ export function AutomationTab({ o, strategies, onChange }: { o: TradingOverview;
                         <div className="btn-row" style={{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}>
                           {!s && (
                             <>
-                              <Button size="sm" icon="play" loading={busy === `paper:${st.id}`} disabled={!allowed || busy !== null || o.emergency.active || !o.risk.configured} title={!o.risk.configured ? 'Save the risk settings first' : undefined} onClick={() => void run(`paper:${st.id}`, () => call('automation:start', { strategyId: st.id, mode: 'paper' }), 'Paper automation started').catch(() => undefined)}>Start paper</Button>
+                              <Button size="sm" icon="play" loading={busy === `paper:${st.id}`} disabled={busy !== null || o.emergency.active || !o.risk.configured} title={!o.risk.configured ? 'Save the risk settings first' : undefined} onClick={() => void run(`paper:${st.id}`, () => call('automation:start', { strategyId: st.id, mode: 'paper' }), 'Paper automation started').catch(() => undefined)}>Start paper</Button>
                               {(() => {
                                 const venue = venueOf(st.definition)
                                 const other = venue !== o.live.broker
-                                return <Button size="sm" variant="danger" icon="bolt" disabled={!allowed || busy !== null || other || !o.live.enabled || o.emergency.active} title={other ? `This strategy trades on ${BROKER_LABEL[venue]}. Make it the active broker (Settings → General) to start it live.` : !o.live.enabled ? 'Enable live trading first' : undefined} onClick={() => setStartLive(st)}>Start live</Button>
+                                return <Button size="sm" variant="danger" icon="bolt" disabled={busy !== null || other || !o.live.enabled || o.emergency.active} title={other ? `This strategy trades on ${BROKER_LABEL[venue]}. Make it the active broker (Settings → General) to start it live.` : !o.live.enabled ? 'Enable live trading first' : undefined} onClick={() => setStartLive(st)}>Start live</Button>
                               })()}
                             </>
                           )}

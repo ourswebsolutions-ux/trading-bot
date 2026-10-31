@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import type { Strategy } from '@shared/ipc'
 import type { StrategyDefinition } from '@shared/strategyRules'
-import { PaywallBanner, useAccess } from '../components/paywall'
 import { Button, ConfirmDialog, Empty, ErrorState, Panel, Skeleton, useToast } from '../components/ui'
 import { call, errorMessage } from '../lib/api'
 import { dateTime } from '../lib/format'
@@ -21,7 +20,6 @@ type Mode =
 export function Strategies() {
   const toast = useToast()
   const { navigate } = useApp()
-  const { allowed } = useAccess()
   const list = useResource(() => call('strategies:list'), [])
   const [mode, setMode] = useState<Mode>({ kind: 'list' })
   const [busy, setBusy] = useState<{ id: string; action: string } | null>(null)
@@ -87,7 +85,6 @@ export function Strategies() {
       {mode.kind === 'view' && current ? (
         <Details
           s={current}
-          allowed={allowed}
           busy={busy?.id === current.id ? busy.action : null}
           onBack={() => setMode({ kind: 'list' })}
           onEdit={() => setMode({ kind: 'builder', id: current.id })}
@@ -101,13 +98,12 @@ export function Strategies() {
         />
       ) : (
         <div className="page">
-          <PaywallBanner feature="Creating, editing, enabling and backtesting strategies" />
           <Panel
             title="Strategies"
             actions={
               <>
-                <Button variant="ghost" icon="sliders" onClick={() => setMode({ kind: 'builder', source: 'manual' })} disabled={!allowed}>Advanced builder</Button>
-                <Button variant="primary" icon="brain" onClick={newFromPrompt} disabled={!allowed}>New strategy from prompt</Button>
+                <Button variant="ghost" icon="sliders" onClick={() => setMode({ kind: 'builder', source: 'manual' })}>Advanced builder</Button>
+                <Button variant="primary" icon="brain" onClick={newFromPrompt}>New strategy from prompt</Button>
               </>
             }
             flush
@@ -118,7 +114,7 @@ export function Strategies() {
               <Empty
                 icon="strategies"
                 title="No strategies yet"
-                action={allowed ? <div className="btn-row" style={{ justifyContent: 'center' }}><Button variant="primary" icon="brain" onClick={newFromPrompt}>Write a strategy prompt</Button><Button variant="ghost" icon="sliders" onClick={() => setMode({ kind: 'builder', source: 'manual' })}>Build a strategy</Button></div> : undefined}
+                action={<div className="btn-row" style={{ justifyContent: 'center' }}><Button variant="primary" icon="brain" onClick={newFromPrompt}>Write a strategy prompt</Button><Button variant="ghost" icon="sliders" onClick={() => setMode({ kind: 'builder', source: 'manual' })}>Build a strategy</Button></div>}
               >
                 Describe your strategy in plain language: the AI proposes rules, TradePilot validates and explains them, and you confirm before anything is saved. Prefer to set every rule yourself? Use the advanced builder.
               </Empty>
@@ -144,9 +140,9 @@ export function Strategies() {
                           <td className="r" onClick={(e) => e.stopPropagation()}>
                             <div className="btn-row" style={{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}>
                               <Button size="sm" variant="ghost" onClick={() => setMode({ kind: 'view', id: s.id })}>View</Button>
-                              <Button size="sm" variant="ghost" icon="brain" disabled={!allowed || b !== null} onClick={() => setMode({ kind: 'studio', studio: 'modify', id: s.id })}>Change</Button>
-                              <Button size="sm" variant="ghost" icon="copy" loading={b === 'duplicate'} disabled={!allowed || b !== null} onClick={() => void act(s, 'duplicate')}>Duplicate</Button>
-                              <Button size="sm" loading={b === 'toggle'} disabled={b !== null || (s.status === 'disabled' && (!allowed || !s.validation.valid))} title={s.status === 'disabled' && !s.validation.valid ? s.validation.errors[0]?.message : undefined} onClick={() => void act(s, 'toggle')}>{s.status === 'enabled' ? 'Disable' : 'Enable'}</Button>
+                              <Button size="sm" variant="ghost" icon="brain" disabled={b !== null} onClick={() => setMode({ kind: 'studio', studio: 'modify', id: s.id })}>Change</Button>
+                              <Button size="sm" variant="ghost" icon="copy" loading={b === 'duplicate'} disabled={b !== null} onClick={() => void act(s, 'duplicate')}>Duplicate</Button>
+                              <Button size="sm" loading={b === 'toggle'} disabled={b !== null || (s.status === 'disabled' && (!s.validation.valid))} title={s.status === 'disabled' && !s.validation.valid ? s.validation.errors[0]?.message : undefined} onClick={() => void act(s, 'toggle')}>{s.status === 'enabled' ? 'Disable' : 'Enable'}</Button>
                               <Button size="sm" variant="ghost" icon="trash" disabled={b !== null} onClick={() => setDeleting(s)}>Delete</Button>
                             </div>
                           </td>

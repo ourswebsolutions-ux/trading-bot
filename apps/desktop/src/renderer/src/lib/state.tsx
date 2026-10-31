@@ -1,17 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { AppInfo, AuthStatus, EngineStatus, GeneralPreferences, SubscriptionView, UpdateState } from '@shared/ipc'
+import type { AppInfo, AuthStatus, EngineStatus, GeneralPreferences, UpdateState } from '@shared/ipc'
 import { call } from './api'
 import { useEvent } from './hooks'
 
-export type Page = 'gold' | 'dashboard' | 'strategies' | 'trading' | 'analytics' | 'notifications' | 'subscription' | 'settings'
+export type Page = 'gold' | 'dashboard' | 'strategies' | 'trading' | 'analytics' | 'notifications' | 'settings'
 
 interface AppState {
   auth: AuthStatus | null
   setAuth: (s: AuthStatus) => void
   info: AppInfo | null
-  subscription: SubscriptionView | null
-  setSubscription: (v: SubscriptionView) => void
-  refreshSubscription: () => Promise<SubscriptionView | undefined>
   updates: UpdateState | null
   setUpdates: (s: UpdateState) => void
   engine: EngineStatus | null
@@ -34,7 +31,6 @@ export const useApp = () => {
 export function AppProvider({ children }: { children: ReactNode }) {
   const [auth, setAuth] = useState<AuthStatus | null>(null)
   const [info, setInfo] = useState<AppInfo | null>(null)
-  const [subscription, setSubscription] = useState<SubscriptionView | null>(null)
   const [updates, setUpdates] = useState<UpdateState | null>(null)
   const [engine, setEngine] = useState<EngineStatus | null>(null)
   const [unread, setUnread] = useState(0)
@@ -51,7 +47,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const unlocked = auth?.state === 'unlocked'
   useEffect(() => {
     if (!unlocked) return
-    void call('subscription:view').then(setSubscription).catch(() => undefined)
     void call('settings:getPreferences').then(setPrefs).catch(() => undefined)
     void call('engine:status').then(setEngine).catch(() => undefined)
     void call('notifications:list').then((l) => setUnread(l.filter((n) => !n.readAt).length)).catch(() => undefined)
@@ -59,7 +54,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [unlocked])
 
   useEvent('auth:changed', setAuth)
-  useEvent('subscription:changed', setSubscription)
   useEvent('updates:changed', setUpdates)
   useEvent('engine:changed', setEngine)
   useEvent('notifications:changed', (p) => setUnread(p.unread))
@@ -93,25 +87,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => events.forEach((e) => window.removeEventListener(e, ping))
   }, [unlocked])
 
-  const refreshSubscription = useCallback(async () => {
-    const v = await call('subscription:refresh')
-    setSubscription(v)
-    return v
-  }, [])
-
   const navigate = useCallback((p: Page, prm: Record<string, string> = {}) => {
     setPage(p)
     setParams(prm)
   }, [])
 
   const value = useMemo<AppState>(
-    () => ({ auth, setAuth, info, subscription, setSubscription, refreshSubscription, updates, setUpdates, engine, unread, setUnread, prefs, setPrefs, page, navigate, params }),
-    [auth, info, subscription, refreshSubscription, updates, engine, unread, prefs, page, navigate, params]
+    () => ({ auth, setAuth, info, updates, setUpdates, engine, unread, setUnread, prefs, setPrefs, page, navigate, params }),
+    [auth, info, updates, engine, unread, prefs, page, navigate, params]
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
-}
-
-/** Remaining trial/subscription time computed on the server clock (offset-adjusted), not the local clock. */
-export function serverNow(view: SubscriptionView | null, localNow = Date.now()): number {
-  return localNow + (view?.serverOffsetMs ?? 0)
 }

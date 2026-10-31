@@ -1,20 +1,17 @@
 import { useEffect, useState } from 'react'
-import { TRIAL_DURATION_MS } from '@tradepilot/shared'
 import { BrandMark, Icon, type IconName } from './components/icons'
 import { ConfirmDialog, StatusDot } from './components/ui'
 import { call } from './lib/api'
-import { ago, date, duration } from './lib/format'
 import { useEvent, useNow } from './lib/hooks'
 import { TransportStatus } from './components/market'
 import type { MarketHealth } from '@shared/ipc'
-import { serverNow, useApp, type Page } from './lib/state'
+import { useApp, type Page } from './lib/state'
 import { Analytics } from './pages/Analytics'
 import { Dashboard } from './pages/Dashboard'
 import { Gold } from './pages/Gold'
 import { Notifications } from './pages/Notifications'
 import { Settings } from './pages/Settings'
 import { Strategies } from './pages/Strategies'
-import { Subscription } from './pages/Subscription'
 import { Trading } from './pages/Trading'
 
 const NAV: { page: Page; label: string; icon: IconName }[] = [
@@ -23,7 +20,6 @@ const NAV: { page: Page; label: string; icon: IconName }[] = [
   { page: 'strategies', label: 'Strategies', icon: 'strategies' },
   { page: 'trading', label: 'Trading', icon: 'trading' },
   { page: 'analytics', label: 'Analytics', icon: 'analytics' },
-  { page: 'subscription', label: 'Subscription', icon: 'card' },
   { page: 'settings', label: 'Settings', icon: 'settings' }
 ]
 const CRUMBS: Record<Page, string> = {
@@ -33,37 +29,7 @@ const CRUMBS: Record<Page, string> = {
   trading: 'Account, automation and orders',
   analytics: 'Backtest strategies on historical data',
   notifications: 'Trading alerts and account messages (also sent by email / WhatsApp when enabled)',
-  subscription: 'Plans, payments and access',
   settings: 'Preferences, security and integrations'
-}
-
-function AccessCard() {
-  const { subscription, navigate } = useApp()
-  const now = useNow(1000)
-  const s = subscription?.status
-  let label = 'Access'
-  let value = 'Checking…'
-  let meter: number | null = null
-  if (subscription && !subscription.configured) value = 'Server not configured'
-  else if (s?.subscription?.status === 'active') {
-    label = `${s.subscription.planCode === 'lifetime' ? 'Lifetime' : 'Monthly'} plan`
-    value = s.subscription.expiresAt ? `Until ${date(s.subscription.expiresAt)}` : 'Active'
-  } else if (s?.trial.active) {
-    const left = Date.parse(s.trial.endsAt) - serverNow(subscription, now)
-    label = 'Free trial'
-    value = left > 0 ? `${duration(left, false)} left` : 'Ending…'
-    meter = Math.max(0, Math.min(100, (left / TRIAL_DURATION_MS) * 100))
-  } else if (s) {
-    label = s.access.reason === 'subscription_expired' ? 'Subscription expired' : 'Trial ended'
-    value = 'Choose a plan'
-  } else if (subscription?.syncError) value = 'Offline'
-  return (
-    <button className="access-card" onClick={() => navigate('subscription')}>
-      <div className="label">{label}</div>
-      <div className="value">{value}</div>
-      {meter !== null && <div className="meter"><i style={{ width: `${meter}%` }} /></div>}
-    </button>
-  )
 }
 
 function Clock() {
@@ -72,7 +38,7 @@ function Clock() {
 }
 
 export function Shell() {
-  const { page, navigate, unread, subscription, engine, updates, setAuth } = useApp()
+  const { page, navigate, unread, engine, updates, setAuth } = useApp()
   const [confirmLogout, setConfirmLogout] = useState(false)
   const [marketHealth, setMarketHealth] = useState<MarketHealth | undefined>()
   useEffect(() => {
@@ -97,9 +63,6 @@ export function Shell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [navigate, setAuth])
 
-  const sync = subscription
-  const syncTone = !sync?.configured ? 'warn' : sync.syncError ? 'bad' : sync.lastSyncedAt ? 'ok' : undefined
-  const syncLabel = !sync?.configured ? 'Server not configured' : sync.syncError ? (sync.online ? 'Sync error' : 'Server offline') : sync.lastSyncedAt ? `Synced ${ago(sync.lastSyncedAt)}` : 'Connecting…'
   const engineTone = engine?.state === 'ready' ? 'ok' : engine?.state === 'error' ? 'bad' : engine?.state === 'starting' ? 'warn' : undefined
   const updateReady = updates?.phase === 'downloaded'
   const downloading = updates?.phase === 'downloading'
@@ -119,7 +82,6 @@ export function Shell() {
           </button>
         ))}
         <div className="rail-foot">
-          <AccessCard />
           <div className="btn-row" style={{ justifyContent: 'space-between' }}>
             <button className="btn ghost sm" onClick={() => void call('auth:lock').then(setAuth)} title="Lock (Ctrl+Shift+L)">
               <Icon name="lock" size={14} /> Lock
@@ -135,7 +97,6 @@ export function Shell() {
           <h1>{NAV.find((n) => n.page === page)?.label ?? (page === 'notifications' ? 'Notifications' : '')}</h1>
           <span className="crumb">{CRUMBS[page]}</span>
           <div className="spacer" />
-          <span className="status-item" title={sync?.syncError ?? sync?.configurationError ?? ''}><StatusDot tone={syncTone} />{syncLabel}</span>
           <button className="btn ghost sm" style={{ padding: 0, height: 'auto', border: 0 }} onClick={() => navigate('settings', { tab: 'marketdata' })}><TransportStatus health={marketHealth} /></button>
           <span className="status-item" title={engine?.message ?? ''}><StatusDot tone={engineTone} />Engine {engine?.state ?? '…'}</span>
           {(updateReady || downloading) && (
@@ -157,7 +118,6 @@ export function Shell() {
           {page === 'trading' && <Trading />}
           {page === 'analytics' && <Analytics />}
           {page === 'notifications' && <Notifications />}
-          {page === 'subscription' && <Subscription />}
           {page === 'settings' && <Settings />}
         </main>
       </div>

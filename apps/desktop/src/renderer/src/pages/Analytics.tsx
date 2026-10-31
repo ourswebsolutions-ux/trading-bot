@@ -3,7 +3,6 @@ import type { BacktestResult } from '@shared/ipc'
 import { MAX_BACKTEST_DAYS } from '@shared/strategySpec'
 import { venueOf } from '@shared/strategyRules'
 import { CandleChart, LineChart, type ChartMarker } from '../components/charts'
-import { PaywallBanner, useAccess } from '../components/paywall'
 import { Badge, Banner, Button, Empty, Field, Panel, Skeleton } from '../components/ui'
 import { call, errorMessage } from '../lib/api'
 import { dateTime, money, pct, price, qty } from '../lib/format'
@@ -23,7 +22,6 @@ const REASONS: Record<string, string> = { rule: 'Exit rule', signal: 'Signal', s
 
 export function Analytics() {
   const { params, navigate, engine } = useApp()
-  const { allowed } = useAccess()
   const strategies = useResource(() => call('strategies:list'), [])
   const [strategyId, setStrategyId] = useState(params.strategy ?? '')
   const [days, setDays] = useState(60)
@@ -75,7 +73,6 @@ export function Analytics() {
 
   return (
     <div className="page">
-      <PaywallBanner feature="Backtesting" />
       <Panel title="Backtest">
         {!strategies.data ? <Skeleton height={32} /> : strategies.data.length === 0 ? (
           <Empty icon="strategies" title="No strategies to analyse" action={<Button variant="primary" onClick={() => navigate('strategies')}>Create a strategy</Button>} />
@@ -96,7 +93,7 @@ export function Analytics() {
               <input className="input mono" type="number" min={0} max={500} step={0.5} value={slippageBps} onChange={(e) => setSlippageBps(Math.max(0, Math.min(500, Number(e.target.value) || 0)))} />
             </Field>
             <div style={{ paddingBottom: 18 }}>
-              <Button variant="primary" icon="play" onClick={run} loading={running} disabled={!selected || !allowed || !selected.validation.valid}>{running ? 'Running…' : 'Run backtest'}</Button>
+              <Button variant="primary" icon="play" onClick={run} loading={running} disabled={!selected || !selected.validation.valid}>{running ? 'Running…' : 'Run backtest'}</Button>
             </div>
           </div>
         )}

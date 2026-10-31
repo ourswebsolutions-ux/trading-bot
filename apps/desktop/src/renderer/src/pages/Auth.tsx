@@ -80,7 +80,6 @@ function ResetLocalData({ onClose }: { onClose: () => void }) {
       <p style={{ margin: 0 }}>
         This deletes your local password, saved strategies, paper trades, notifications and stored API credentials. It cannot be undone.
       </p>
-      <p style={{ margin: 0 }}>Your trial and subscription are stored on the server and are restored automatically.</p>
       <Field label="Type RESET to confirm" error={error ?? undefined}>
         <input className="input mono" value={text} onChange={(e) => setText(e.target.value)} autoComplete="off" />
       </Field>
@@ -167,7 +166,7 @@ export function AuthScreen() {
           </button>
         )}
         <p className="faint" style={{ margin: 0, fontSize: 12 }}>
-          Signing in here only unlocks this app. Your trial and subscription are verified separately by the TradePilot server.
+          Signing in here only unlocks this app on this computer.
         </p>
       </form>
       {reset && <ResetLocalData onClose={() => setReset(false)} />}
